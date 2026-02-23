@@ -1,4 +1,6 @@
+import json
 import socket
+import struct
 import sys
 
 # from collections import deque
@@ -47,23 +49,44 @@ def main() -> None:
     print("Shutting down...")
 
 
-def decode_message(data: bytes) -> Message:
+def recv_message(sock: socket.socket) -> Message:
     """Decode a message received from a client.
     e.g 'GREETINGS::hello world' (topic=GREETINGS, content=hello world)
     """
-    print("Decoding message...")
+    # length header is exactly 4 bytes
+    raw_length = recv_exactly(sock, 4)
 
-    message: str = data.decode().strip()
-    print(f"Received data: {message}")
+    # unpack big-endian unsigned int from the length header
+    length = struct.unpack(">I", raw_length)[0]
 
-    message_parts: list[str] = message.split("::")
-    if len(message_parts) != 2:
-        raise ValueError(f"Invalid message format: {message}")
+    # Step 2: now read exactly that many bytes
+    raw_payload = recv_exactly(sock, length)
 
-    topic = message_parts[0].strip()
-    content = message_parts[1].strip()
+    try:
+        message_content: dict = json.loads(raw_payload.decode("utf-8"))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON payload: {e}")
+
+    try:
+        topic = message_content["topic"].strip()
+        content = message_content["content"].strip()
+    except KeyError as e:
+        raise ValueError(f"Invalid message format: {message_content}") from e
 
     return Message(topic=topic.upper(), content=content)
+
+
+def recv_exactly(sock, n: int) -> bytes:
+    """Returns the exact amout of n bytes from the socket."""
+    buf = b""
+
+    # the while loop logic handles the case where the socket is closed mid-message
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError("Socket closed mid-message")
+        buf += chunk
+    return buf
 
 
 def forward_messages(db: dict) -> None:
@@ -99,13 +122,7 @@ def listen_for_messages(sock: socket.socket, db: dict) -> None:
     # handle client connection
     while True:
         try:
-            data: bytes = conn.recv(1024)
-            print(repr(data))
-            if not data:
-                # client disconnected
-                break
-
-            message: Message = decode_message(data)
+            message: Message = recv_message(sock=conn)
 
             # insert message into database
             db["topics"][message.topic].append(message)
@@ -115,9 +132,11 @@ def listen_for_messages(sock: socket.socket, db: dict) -> None:
 
             if message.content == "SHUTDOWN":
                 raise ShutdownException("Shutdown requested")
-
-        except ConnectionResetError:
-            print("Client disconnected abruptly")
+        except (ConnectionError, ConnectionResetError) as e:
+            print(f"Connection error: {e}")
+            break
+        except Exception as e:
+            print(f"Unexpected error: {e}")
             break
 
     conn.close()

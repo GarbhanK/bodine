@@ -7,7 +7,7 @@ class Producer:
         self.address = address
         self.port = int(port)
         self.topic = topic
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._connect()
 
     def __repr__(self) -> str:
@@ -15,13 +15,18 @@ class Producer:
 
     def _connect(self):
         print(f"Connecting to {self.address}:{self.port}...")
-        self.socket.connect((self.address, self.port))
+        self.sock.connect((self.address, self.port))
+
+    def _build_payload(self, message: str) -> bytes:
+        """Create a message with the topic and message. The message length is added to the first 4 bytes of the payload"""
+        # message = f"{self.topic}::{message}"
+        length = len(message)
+        length_header: bytes = length.to_bytes(4, byteorder="big")
+        return length_header + message.encode(encoding="utf-8")
 
     def send(self, message: str) -> None:
-        print(
-            f"Sending message '{message}' to topic '{self.topic}' via broker '{self.address}:{self.port}'"
-        )
+        print(f"Sending message '{message}' to topic '{self.topic}'...")
         try:
-            self.socket.sendall(message.encode())
+            self.sock.sendall(self._build_payload(message))
         except Exception as e:
             print(f"Error sending message: {e}")
