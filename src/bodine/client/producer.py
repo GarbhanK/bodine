@@ -19,7 +19,6 @@ class Producer:
 
     def _build_payload(self, message: str) -> bytes:
         """Create a message with the topic and message. The message length is added to the first 4 bytes of the payload"""
-        # message = f"{self.topic}::{message}"
         length = len(message)
         length_header: bytes = length.to_bytes(4, byteorder="big")
         return length_header + message.encode(encoding="utf-8")

@@ -4,19 +4,14 @@ import struct
 import sys
 
 # from collections import deque
-from bodine.broker.models import Client, Message
+from bodine.broker.models import PIG_DB, Client, ConnRegistry, Message
 from bodine.broker.utils import ShutdownException
 
-PORT: int = 9000
+PORT: int = 9001
 MAX_CONNECTIONS: int = 5
 
-PIGDB = {
-    "topics": {
-        "greetings": [],
-        "signups": [],
-    },
-    "clients": [],
-}
+PIGDB = PIG_DB()
+CLIENTS = ConnRegistry()
 
 
 def main() -> None:
@@ -30,7 +25,7 @@ def main() -> None:
         sys.exit(1)
 
     # bind to local network and specified port
-    s.bind(("", PORT))
+    s.bind(("127.0.0.1", PORT))
     print(f"socket binded to {PORT}")
 
     # put socket into listening mode
@@ -39,12 +34,10 @@ def main() -> None:
 
     while broker_active:
         try:
-            listen_for_messages(s, PIGDB)
+            handle_messages(s, PIGDB)
         except ShutdownException:
             print("Shutdown requested")
             broker_active = False
-
-        forward_messages(PIGDB)
 
     print("Shutting down...")
 
@@ -68,12 +61,13 @@ def recv_message(sock: socket.socket) -> Message:
         raise ValueError(f"Invalid JSON payload: {e}")
 
     try:
-        topic = message_content["topic"].strip()
-        content = message_content["content"].strip()
+        topic: str = message_content["topic"].strip()
+        content: str = message_content["message"].strip()
+        action: str = message_content["action"].strip()
     except KeyError as e:
         raise ValueError(f"Invalid message format: {message_content}") from e
 
-    return Message(topic=topic.upper(), content=content)
+    return Message(topic=topic.upper(), payload=content, action=action)
 
 
 def recv_exactly(sock, n: int) -> bytes:
@@ -89,58 +83,70 @@ def recv_exactly(sock, n: int) -> bytes:
     return buf
 
 
-def forward_messages(db: dict) -> None:
-    """Forward messages from clients to other clients."""
-    print("Forwarding messages...")
-
-    clients: list[Client] = db["clients"]
-
-    for client in clients:
-        print(f"Forwarding messages to {client.address}:{client.port}")
-        topic_messages = db["topics"][client.topic]
-        for message in topic_messages:
-            print(f"Sending message: {message}")
-            client.conn.send(message.content.encode())
-            message.sent = True
-
-
-def listen_for_messages(sock: socket.socket, db: dict) -> None:
+def handle_messages(sock: socket.socket, db: PIG_DB) -> None:
     """Listen for incoming connections on the specified port."""
     # establish connnection with client
     conn, addr = sock.accept()
     print(f"Got connection from {addr}")
 
-    # todo: parse topic from client upon connection
-    topic: str = "greetings"
-    # topic: str = parse_topic()
-    client: Client = Client(conn=conn, address=addr[0], port=addr[1], topic=topic)
-
-    db["clients"].append(client)
-
-    conn.send("Thank you for connecting\n".encode())
+    # add it to the client connection
+    client: Client = Client(conn=conn)
+    CLIENTS.add_client(client)
+    # print(f"Clients: {CLIENTS}")
 
     # handle client connection
-    while True:
-        try:
+    try:
+        while True:
             message: Message = recv_message(sock=conn)
 
-            # insert message into database
-            db["topics"][message.topic].append(message)
+            if message.action == "produce":
+                # insert message into database
+                PIGDB.insert(message)
+            elif message.action == "consume":
+                handle_consume(client, topic=message.topic)
 
-            if message.content == "EXIT":
-                break
-
-            if message.content == "SHUTDOWN":
+            if message.payload == "SHUTDOWN":
                 raise ShutdownException("Shutdown requested")
-        except (ConnectionError, ConnectionResetError) as e:
-            print(f"Connection error: {e}")
-            break
-        except Exception as e:
-            print(f"Unexpected error: {e}")
-            break
 
-    conn.close()
+    except (ConnectionError, ConnectionResetError) as e:
+        print(f"Connection error: {e}")
+        pass
+    finally:
+        CLIENTS.remove_client(client.id)
+        conn.close()
+
+
+def handle_consume(client: Client, topic: str) -> None:
+    """Respond to the client with the offset message from the topic"""
+
+    topic_offset: int = client.offsets.get(topic, 0)
+
+    # retrieve message from the database matching the offset
+    offset_message: Message = PIGDB.get(topic, topic_offset)
+
+    # increment client offset by 1
+    client.offsets[topic] += 1
+
+    send_message(sock=client.conn, message=offset_message)
+
+
+def _build_payload(message: str) -> bytes:
+    """Create a message with the topic and message. The message length is added to the first 4 bytes of the payload"""
+    length = len(message)
+    length_header: bytes = length.to_bytes(4, byteorder="big")
+    return length_header + message.encode(encoding="utf-8")
+
+
+def send_message(sock: socket.socket, message: Message) -> None:
+    """Send a message to the client"""
+    payload: str = json.dumps({"status": "OK", "message": message.payload})
+    full_response: bytes = _build_payload(payload)
+    sock.sendall(full_response)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("Shutting down...")
+        sys.exit(0)
