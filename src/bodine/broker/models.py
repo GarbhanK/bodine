@@ -53,7 +53,7 @@ class Topic:
 
 
 @dataclass
-class PIG_DB:
+class PIGDB:
     _topics: dict[str, Topic] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
