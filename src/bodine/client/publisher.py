@@ -1,7 +1,10 @@
+import json
 import socket
 
+from bodine.client.base import ClientBase
 
-class Producer:
+
+class Publisher(ClientBase):
     def __init__(self, broker, topic):
         address, port = broker.split(":")
         self.address = address
@@ -11,17 +14,23 @@ class Producer:
         self._connect()
 
     def __repr__(self) -> str:
-        return f"Producer({self.address}:{self.port}, {self.topic})"
+        return f"Publisher({self.address}:{self.port}, {self.topic})"
 
     def _connect(self):
         print(f"Connecting to {self.address}:{self.port}...")
         self.sock.connect((self.address, self.port))
 
-    def _build_payload(self, message: str) -> bytes:
-        """Create a message with the topic and message. The message length is added to the first 4 bytes of the payload"""
-        length = len(message)
-        length_header: bytes = length.to_bytes(4, byteorder="big")
-        return length_header + message.encode(encoding="utf-8")
+        print("Sending initial connection request...")
+        payload: str = json.dumps(
+            {
+                "topic": self.topic,
+                "consumer_group": None,
+                "action": "publish",
+                "message": "",
+            }
+        )
+        connection_message = self._build_payload(payload)
+        self.sock.sendall(connection_message)
 
     def send(self, message: str) -> None:
         print(f"Sending message '{message}' to topic '{self.topic}'...")

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 class Client:
     id: str = ""
     conn: socket.socket = field(default_factory=socket.socket)
+    alive: bool = True
     group: str | None = None
     offsets: dict[str, int] = field(default_factory=dict)  # topic -> offset
 
@@ -29,6 +30,7 @@ class ConnRegistry:
     def remove_client(self, client_id: str) -> None:
         with self._lock:
             self._clients.pop(client_id, None)
+            print(f"Client {client_id} removed")
 
     def all_clients(self) -> list[Client]:
         with self._lock:
@@ -64,8 +66,21 @@ class PIG_DB:
 
     def get(self, topic: str, offset: int) -> Message:
         with self._lock:
-            return self._topics[topic].messages[offset]
+            # TODO: Re-think the logic for handling invalid topics and offsets
+            # for now we create the topic if it doesn't exist
+            if topic not in self._topics:
+                self._topics[topic] = Topic(name=topic)
+
+            topic_data: Topic = self._topics[topic]
+
+            return topic_data.messages[offset]
 
     def get_all(self, topic: str) -> list[Message]:
         with self._lock:
             return self._topics[topic].messages
+
+    def get_topic_size(self, topic: str) -> int:
+        with self._lock:
+            if topic not in self._topics:
+                return 0
+            return len(self._topics[topic].messages)

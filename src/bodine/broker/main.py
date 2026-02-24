@@ -2,10 +2,15 @@ import json
 import socket
 import struct
 import sys
+import threading
+from typing import Callable
 
 # from collections import deque
 from bodine.broker.models import PIG_DB, Client, ConnRegistry, Message
-from bodine.broker.utils import ShutdownException
+from bodine.broker.utils import (
+    ClientDisconnected,
+    # ShutdownException,
+)
 
 PORT: int = 9001
 MAX_CONNECTIONS: int = 5
@@ -16,7 +21,6 @@ CLIENTS = ConnRegistry()
 
 def main() -> None:
     print("Starting broker...")
-    broker_active: bool = True
 
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -32,28 +36,36 @@ def main() -> None:
     s.listen(MAX_CONNECTIONS)
     print("Socket is listening...")
 
-    while broker_active:
-        try:
-            handle_messages(s, PIGDB)
-        except ShutdownException:
-            print("Shutdown requested")
-            broker_active = False
+    try:
+        while True:
+            conn, addr = s.accept()
+            print(f"Got connection from {addr}")
+            spawn_worker_thread(conn, handle_connection)
 
-    print("Shutting down...")
+    except (KeyboardInterrupt, SystemExit):
+        print("Shutting down...")
+        s.close()
 
 
-def recv_message(sock: socket.socket) -> Message:
-    """Decode a message received from a client.
-    e.g 'GREETINGS::hello world' (topic=GREETINGS, content=hello world)
-    """
-    # length header is exactly 4 bytes
-    raw_length = recv_exactly(sock, 4)
+def spawn_worker_thread(conn: socket.socket, func: Callable):
+    """Spawn a worker thread to handle messages from a client."""
+    thread = threading.Thread(target=func, args=(conn, PIGDB))
+    thread.start()
 
-    # unpack big-endian unsigned int from the length header
-    length = struct.unpack(">I", raw_length)[0]
 
-    # Step 2: now read exactly that many bytes
-    raw_payload = recv_exactly(sock, length)
+def recv_message(sock: socket.socket) -> Message | None:
+    """Decode a message received from a client."""
+    try:
+        # length header is exactly 4 bytes
+        raw_length: bytes = recv_exactly(sock, 4)
+
+        # unpack big-endian unsigned int from the length header
+        length: int = struct.unpack(">I", raw_length)[0]
+
+        # Step 2: now read exactly that many bytes
+        raw_payload: bytes = recv_exactly(sock, length)
+    except ClientDisconnected:
+        return None
 
     try:
         message_content: dict = json.loads(raw_payload.decode("utf-8"))
@@ -78,56 +90,98 @@ def recv_exactly(sock, n: int) -> bytes:
     while len(buf) < n:
         chunk = sock.recv(n - len(buf))
         if not chunk:
-            raise ConnectionError("Socket closed mid-message")
+            raise ClientDisconnected("Socket closed mid-message")
         buf += chunk
     return buf
 
 
-def handle_messages(sock: socket.socket, db: PIG_DB) -> None:
+def handle_connection(conn: socket.socket, db: PIG_DB) -> None:
     """Listen for incoming connections on the specified port."""
-    # establish connnection with client
-    conn, addr = sock.accept()
-    print(f"Got connection from {addr}")
 
     # add it to the client connection
     client: Client = Client(conn=conn)
     CLIENTS.add_client(client)
-    # print(f"Clients: {CLIENTS}")
 
     # handle client connection
-    try:
-        while True:
-            message: Message = recv_message(sock=conn)
 
-            if message.action == "produce":
-                # insert message into database
-                PIGDB.insert(message)
-            elif message.action == "consume":
-                handle_consume(client, topic=message.topic)
+    first_message: Message | None = recv_message(sock=client.conn)
+    print(f"Connection message: {first_message}")
 
-            if message.payload == "SHUTDOWN":
-                raise ShutdownException("Shutdown requested")
+    if first_message is None:
+        raise ValueError("Invalid connection message")
 
-    except (ConnectionError, ConnectionResetError) as e:
-        print(f"Connection error: {e}")
-        pass
-    finally:
-        CLIENTS.remove_client(client.id)
-        conn.close()
+    match first_message.action:
+        case "subscribe":
+            handle_subscriber(client, topic=first_message.topic)
+        case "publish":
+            handle_publisher(client, topic=first_message.topic)
+        case _:
+            raise ValueError(f"Unsupported action: {first_message.action}")
+
+    # client socket disconnect
+    CLIENTS.remove_client(client.id)
+    conn.close()
 
 
-def handle_consume(client: Client, topic: str) -> None:
+def handle_publisher(client: Client, topic: str) -> None:
+    """Publish a message to the topic"""
+
+    print(f"Handling publisher client: {client.id}")
+    while client.alive:
+        message: Message | None = recv_message(client.conn)
+        if message is None:
+            client.alive = False
+            continue
+
+        print(f"Received message: {message}")
+
+        # insert message into the database
+        PIGDB.insert(message)
+
+
+def handle_subscriber(client: Client, topic: str) -> None:
     """Respond to the client with the offset message from the topic"""
 
-    topic_offset: int = client.offsets.get(topic, 0)
+    print(f"Handling subscriber client: {client.id} ({topic})")
+    while client.alive:
+        message: Message | None = recv_message(client.conn)
+        if message is None:
+            client.alive = False
+            continue
 
-    # retrieve message from the database matching the offset
-    offset_message: Message = PIGDB.get(topic, topic_offset)
+        print(f"{topic}@{client.id} Poll recieved...")
 
-    # increment client offset by 1
-    client.offsets[topic] += 1
+        # TODO: offset tracking should be per-subscriber-group, not coupled to the client id
+        # get client's offset from the database
 
-    send_message(sock=client.conn, message=offset_message)
+        # create a new offset if topic doesn't exist
+        if topic not in client.offsets:
+            client.offsets[topic] = 0
+
+        topic_offset: int = client.offsets[topic]
+        topic_size: int = PIGDB.get_topic_size(topic)
+
+        # Raise an error if the offset is greater than the topic size
+        if topic_offset > topic_size:
+            raise ValueError(
+                f"Invalid Offset: offset {topic_offset} is greater than topic size {topic_size}"
+            )
+
+        # if subscriber is at the end of the topic, tell them to wait for new messages
+        print(f"{topic_offset=}, {topic_size=}")
+        if topic_offset == topic_size:
+            resp = Message(action="NO_NEW_MESSAGES", topic=topic, payload="")
+            send_poll_response(sock=client.conn, status=resp.action, message=resp)
+            continue
+
+        # retrieve message from the database matching the offset
+        offset_message: Message = PIGDB.get(topic, topic_offset)
+
+        # increment client offset by 1
+        client.offsets[topic] += 1
+
+        # respond to the client with the offset message
+        send_poll_response(sock=client.conn, status="OK", message=offset_message)
 
 
 def _build_payload(message: str) -> bytes:
@@ -137,16 +191,13 @@ def _build_payload(message: str) -> bytes:
     return length_header + message.encode(encoding="utf-8")
 
 
-def send_message(sock: socket.socket, message: Message) -> None:
+def send_poll_response(sock: socket.socket, status: str, message: Message) -> None:
     """Send a message to the client"""
-    payload: str = json.dumps({"status": "OK", "message": message.payload})
+    payload: str = json.dumps({"status": status, "message": message.payload})
+    print(f"Sending response: {payload}")
     full_response: bytes = _build_payload(payload)
     sock.sendall(full_response)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("Shutting down...")
-        sys.exit(0)
+    main()
