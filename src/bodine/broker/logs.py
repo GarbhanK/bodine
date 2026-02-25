@@ -35,17 +35,5 @@ def setup_logging():
     root.setLevel(logging.INFO)
     root.handlers = [handler]
 
-
-def get_publisher_logger():
-    logger = logging.getLogger("publisher")
-    return logging.LoggerAdapter(logger, {"role": "PUBLISHER"})
-
-
-def get_subscriber_logger():
-    logger = logging.getLogger("subscriber")
-    return logging.LoggerAdapter(logger, {"role": "SUBSCRIBER"})
-
-
-def get_system_logger():
-    logger = logging.getLogger("system")
-    return logging.LoggerAdapter(logger, {"role": "SYSTEM"})
+    # switch to this one
+    logging.basicConfig(level=logging.INFO, format="%(threadName)s | %(message)s")

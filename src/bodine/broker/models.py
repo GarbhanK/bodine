@@ -11,10 +11,59 @@ class Client:
     conn: socket.socket = field(default_factory=socket.socket)
     alive: bool = True
     group: str | None = None
-    offsets: dict[str, int] = field(default_factory=dict)  # topic -> offset
 
     def __post_init__(self):
         self.id = str(uuid.uuid4())
+
+
+@dataclass
+class ConsumerGroupRegistry:
+    _groups: dict[str, dict[str, int]] = field(default_factory=dict)
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def _seed_groups(self, consumer_groups: list[str]):
+        with self._lock:
+            for group_name in consumer_groups:
+                self._groups[group_name] = {}
+
+    def add_group(self, group_name: str, topics: list[str]) -> None:
+        with self._lock:
+            self._groups[group_name] = {topic: 0 for topic in topics}
+
+    def add_topic(self, group_name: str, topic: str) -> None:
+        with self._lock:
+            if self._groups[group_name].get(topic):
+                raise ValueError(
+                    f"Topic '{topic}' already exists for group '{group_name}'"
+                )
+            self._groups[group_name][topic] = 0
+
+    def get_topics(self, group_name: str) -> list[str]:
+        with self._lock:
+            return list(self._groups[group_name].keys())
+
+    def lookup(self, group_name: str, topic: str) -> int:
+        """Returns the corresponding offset for a group"""
+
+        with self._lock:
+            group_info: dict[str, int] | None = self._groups.get(group_name)
+            if not group_info:
+                raise ValueError(
+                    f"Subscriber group {group_name} not found in the registry"
+                )
+
+            offset: int = group_info[topic]
+            return offset
+
+    def increment(self, group_name: str, topic: str) -> None:
+        """Increments the offset for a group"""
+        with self._lock:
+            group_info: dict[str, int] | None = self._groups.get(group_name)
+            if not group_info:
+                raise ValueError(
+                    f"Subscriber group {group_name} not found in the registry"
+                )
+            group_info[topic] += 1
 
 
 @dataclass
@@ -39,48 +88,16 @@ class ConnRegistry:
 
 @dataclass
 class Message:
-    action: str
+    event: str
+    content: str
     topic: str
-    payload: str
+    group: str | None
+
     timestamp: float = field(default_factory=dt.datetime.now().timestamp)
     sent: bool = field(default=False)
 
-
-@dataclass
-class Topic:
-    name: str
-    messages: list[Message] = field(default_factory=list)
-
-
-@dataclass
-class PIGDB:
-    _topics: dict[str, Topic] = field(default_factory=dict)
-    _lock: threading.Lock = field(default_factory=threading.Lock)
-
-    def insert(self, message: Message) -> None:
-        with self._lock:
-            if message.topic not in self._topics:
-                self._topics[message.topic] = Topic(name=message.topic)
-
-            self._topics[message.topic].messages.append(message)
-
-    def get(self, topic: str, offset: int) -> Message:
-        with self._lock:
-            # TODO: Re-think the logic for handling invalid topics and offsets
-            # for now we create the topic if it doesn't exist
-            if topic not in self._topics:
-                self._topics[topic] = Topic(name=topic)
-
-            topic_data: Topic = self._topics[topic]
-
-            return topic_data.messages[offset]
-
-    def get_all(self, topic: str) -> list[Message]:
-        with self._lock:
-            return self._topics[topic].messages
-
-    def get_topic_size(self, topic: str) -> int:
-        with self._lock:
-            if topic not in self._topics:
-                return 0
-            return len(self._topics[topic].messages)
+    def __post_init__(self):
+        if not self.event:
+            raise ValueError("Event cannot be empty")
+        if not self.topic:
+            raise ValueError("Topic cannot be empty")

@@ -24,9 +24,8 @@ class Publisher(ClientBase):
         payload: str = json.dumps(
             {
                 "topic": self.topic,
-                "consumer_group": None,
-                "action": "publish",
-                "message": "",
+                "event": "publish",
+                "content": "",
             }
         )
         connection_message = self._build_payload(payload)

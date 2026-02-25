@@ -26,13 +26,13 @@ class Subscriber(ClientBase):
         print("Sending initial connection request...")
         payload: str = json.dumps(
             {
+                "event": "subscribe",
                 "topic": self.topic,
-                "consumer_group": "default",
-                "action": "subscribe",
-                "message": "",
+                "group": "default",
+                "content": "",
             }
         )
-        connection_message = self._build_payload(payload)
+        connection_message: bytes = self._build_payload(payload)
         self.sock.sendall(connection_message)
 
     def _recv_exactly(self, sock, n: int) -> bytes:
@@ -68,9 +68,7 @@ class Subscriber(ClientBase):
     def _fetch_next(self) -> dict:
         """Fetches the next message from the broker. Send polling message to the broker"""
 
-        payload: str = json.dumps(
-            {"action": "poll", "topic": self.topic, "message": ""}
-        )
+        payload: str = json.dumps({"event": "poll", "topic": self.topic, "content": ""})
         polling_message = self._build_payload(payload)
         self.sock.sendall(polling_message)
         print(f"Sent polling message: {payload}")

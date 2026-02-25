@@ -1,18 +1,18 @@
 import json
+import logging
 import socket
 import struct
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from bodine.broker import logs
-from bodine.broker.models import PIGDB, Client, ConnRegistry, Message
+from bodine.broker.models import Client, ConnRegistry, ConsumerGroupRegistry, Message
 from bodine.broker.utils import ClientDisconnected
+from bodine.broker.wal import PIGDB
 
 logs.setup_logging()
-logger = logs.get_system_logger()
-publog = logs.get_publisher_logger()
-sublog = logs.get_subscriber_logger()
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,8 @@ class BrokerConfig:
     host: str
     port: int
     max_connections: int
+    partitions: int = 1
+    consumer_groups: list[str] = field(default_factory=list)
 
 
 class Broker:
@@ -28,6 +30,7 @@ class Broker:
     max_connections: int
     sock: socket.socket
     active_clients: ConnRegistry
+    consumer_registry: ConsumerGroupRegistry
     pigdb: PIGDB
 
     def __init__(self, cfg: BrokerConfig):
@@ -35,12 +38,10 @@ class Broker:
         self.port = cfg.port
         self.max_connections = cfg.max_connections
         self.active_clients = ConnRegistry()
+        self.consumer_registry = ConsumerGroupRegistry()
         self.pigdb = PIGDB()
 
-        logger.info("Test INFO")
-        logger.error("Test ERROR")
-        publog.info("Test INFO")
-        sublog.info("Test ERROR")
+        self.consumer_registry._seed_groups(cfg.consumer_groups)
 
     def __repr__(self) -> str:
         return f"Broker@{self.host}:{self.port}"
@@ -53,55 +54,74 @@ class Broker:
 
         # bind to local network and specified port
         self.sock.bind((self.host, self.port))
-        print(f"socket binded to {self.port}")
+        logger.info(f"socket binded to {self.port}")
 
         # put socket into listening mode
         self.sock.listen(self.max_connections)
-        print("Socket is listening...")
+        logger.info("Socket is listening...")
 
     def accept_connections(self) -> None:
         while True:
             try:
+                logger.info("Waiting to accept connection...")
                 conn, addr = self.sock.accept()
+                logger.info(f"Got connection from {addr}")
             except ConnectionAbortedError:
+                logger.info("Connection aborted")
                 continue  # ignore and keep listening
             except OSError as e:
-                print(f"Accept failed: {e}")
+                if e.errno == 9:  # bad file descriptor
+                    logger.error("Bad file descriptor")
+                    break  # break out of the loop
+                logger.error(f"Accept failed: {e}")
                 continue
 
-            print(f"Got connection from {addr}")
-            self._spawn_worker_thread(self.handle_connection, args=(conn,))
+            # add client to registry of active clients
+            client: Client = Client(conn=conn)
+            self.active_clients.add_client(client)
 
-    def handle_connection(self, conn: socket.socket) -> None:
+            # parse the connection message
+            connection_message: Message | None = self._recv_message(sock=client.conn)
+            logger.info(f"Connection message: {connection_message}")
+
+            if connection_message is None:
+                raise ValueError("Invalid connection message")
+
+            thread_prefix: str = "S" if connection_message.event == "subscribe" else "P"
+            thread_name: str = f"{thread_prefix}::{client.id}"
+            self._spawn_worker_thread(
+                name=thread_name,
+                func=self.handle_connection,
+                args=(client, connection_message),
+            )
+
+    # TODO: look into tracking threads as part of the broker class?
+    def _spawn_worker_thread(self, name: str, func: Callable, args: tuple[Any, ...]):
+        logger.info(f"Spawning thread '{name}'")
+        thread = threading.Thread(name=name, target=func, args=args)
+        thread.start()
+
+    def handle_connection(self, client: Client, connection_message: Message) -> None:
         """Listen for incoming connections on the specified port."""
 
-        # add it to the client connection
-        client: Client = Client(conn=conn)
-        self.active_clients.add_client(client)
-
-        # handle client connection
-        first_message: Message | None = self._recv_message(sock=client.conn)
-        print(f"Connection message: {first_message}")
-
-        if first_message is None:
-            raise ValueError("Invalid connection message")
-
-        match first_message.action:
+        match connection_message.event:
             case "subscribe":
-                self.handle_subscriber(client, topic=first_message.topic)
+                if connection_message.group is None:
+                    raise ValueError("Consumer group is required")
+
+                self.handle_subscriber(
+                    client,
+                    topic=connection_message.topic,
+                    group=connection_message.group,
+                )
             case "publish":
-                self.handle_publisher(client, topic=first_message.topic)
+                self.handle_publisher(client, topic=connection_message.topic)
             case _:
-                raise ValueError(f"Unsupported action: {first_message.action}")
+                raise ValueError(f"Unsupported event: {connection_message.event}")
 
         # client socket disconnect
         self.active_clients.remove_client(client.id)
-        self.sock.close()
-
-    # TODO: look into tracking threads as part of the broker class?
-    def _spawn_worker_thread(self, func: Callable, args: tuple[Any, ...]):
-        thread = threading.Thread(target=func, args=args)
-        thread.start()
+        client.conn.close()
 
     def _recv_message(self, sock: socket.socket) -> Message | None:
         """Decode a message received from a client."""
@@ -123,13 +143,16 @@ class Broker:
             raise ValueError(f"Invalid JSON payload: {e}")
 
         try:
-            topic: str = message_content["topic"].strip()
-            content: str = message_content["message"].strip()
-            action: str = message_content["action"].strip()
-        except KeyError as e:
-            raise ValueError(f"Invalid message format: {message_content}") from e
+            message = Message(
+                event=message_content.get("event", ""),
+                topic=message_content.get("topic", ""),
+                content=message_content.get("content", ""),
+                group=message_content.get("group"),
+            )
+        except ValueError as e:
+            raise ValueError(f"Invalid message content: {e}")
 
-        return Message(topic=topic.upper(), payload=content, action=action)
+        return message
 
     def _recv_exactly(self, sock, n: int) -> bytes:
         """Returns the exact amout of n bytes from the socket."""
@@ -156,50 +179,58 @@ class Broker:
             print(f"Received message: {message}")
 
             # insert message into the database
+            # future version will append to the WAL
             self.pigdb.insert(message)
 
-    def handle_subscriber(self, client: Client, topic: str) -> None:
+    def handle_subscriber(self, client: Client, topic: str, group: str) -> None:
         """Respond to the client with the offset message from the topic"""
 
-        print(f"Handling subscriber client: {client.id} ({topic})")
+        logger.info(f"Handling subscriber client: {client.id} ({group}@{topic})")
         while client.alive:
-            message: Message | None = self._recv_message(client.conn)
-            if message is None:
+            poll_message: Message | None = self._recv_message(client.conn)
+            if poll_message is None:
                 client.alive = False
                 continue
 
-            print(f"{topic}@{client.id} Poll recieved...")
+            logger.info(f"{topic}@{client.id} Poll recieved...")
 
             # TODO: offset tracking should be per-subscriber-group, not coupled to the client id
-            # get client's offset from the database
 
             # create a new offset if topic doesn't exist
-            if topic not in client.offsets:
-                client.offsets[topic] = 0
+            if topic not in self.consumer_registry.get_topics(group):
+                self.consumer_registry.add_topic(group, topic)
 
-            topic_offset: int = client.offsets[topic]
-            topic_size: int = self.pigdb.get_topic_size(topic)
+            # get client's offset from the consumer group registry
+            offset: int = self.consumer_registry.lookup(group, topic)
+
+            # topic_offset: int = client.offsets[topic]
+            # topic_size: int = self.pigdb.get_topic_size(topic)
 
             # Raise an error if the offset is greater than the topic size
-            if topic_offset > topic_size:
-                raise ValueError(
-                    f"Invalid Offset: offset {topic_offset} is greater than topic size {topic_size}"
-                )
+            # if topic_offset > topic_size:
+            #     raise ValueError(
+            #         f"Invalid Offset: offset {topic_offset} is greater than topic size {topic_size}"
+            #     )
 
             # if subscriber is at the end of the topic, tell them to wait for new messages
-            print(f"{topic_offset=}, {topic_size=}")
-            if topic_offset == topic_size:
-                resp = Message(action="NO_NEW_MESSAGES", topic=topic, payload="")
+            # print(f"{topic_offset=}, {topic_size=}")
+
+            end_of_topic = offset >= self.pigdb.get_topic_size(topic)
+
+            if end_of_topic:
+                resp = Message(
+                    event="poll_response", topic=topic, group=group, content=""
+                )
                 self.send_poll_response(
-                    sock=client.conn, status=resp.action, message=resp
+                    sock=client.conn, status="NO_NEW_MESSAGES", message=resp
                 )
                 continue
 
             # retrieve message from the database matching the offset
-            offset_message: Message = self.pigdb.get(topic, topic_offset)
+            offset_message: Message = self.pigdb.get(topic, offset)
 
-            # increment client offset by 1
-            client.offsets[topic] += 1
+            # increment client offset by 1 for the next poll request
+            self.consumer_registry.increment(group, topic)
 
             # respond to the client with the offset message
             self.send_poll_response(
@@ -216,7 +247,7 @@ class Broker:
         self, sock: socket.socket, status: str, message: Message
     ) -> None:
         """Send a message to the client"""
-        payload: str = json.dumps({"status": status, "message": message.payload})
+        payload: str = json.dumps({"status": status, "message": message.content})
         print(f"Sending response: {payload}")
         full_response: bytes = self._build_payload(payload)
         sock.sendall(full_response)

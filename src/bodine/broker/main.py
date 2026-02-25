@@ -1,3 +1,5 @@
+import logging
+
 from bodine.broker import logs
 from bodine.broker.broker import Broker, BrokerConfig
 
@@ -5,7 +7,7 @@ PORT: int = 9001
 MAX_CONNECTIONS: int = 5
 
 logs.setup_logging()
-logger = logs.get_system_logger()
+logger = logging.getLogger(__name__)
 
 
 def main() -> None:
@@ -16,6 +18,7 @@ def main() -> None:
         host="127.0.0.1",
         port=PORT,
         max_connections=MAX_CONNECTIONS,
+        consumer_groups=["default", "group1"],
     )
     broker = Broker(cfg)
     broker.setup()

@@ -13,7 +13,7 @@ except ConnectionRefusedError as e:
 print(f"Producer created: {p}")
 
 message = json.dumps(
-    {"action": "publish", "topic": "greetings", "message": "hello, world!"}
+    {"event": "publish", "topic": "greetings", "content": "hello, world!"}
 )
 
 print(message)
