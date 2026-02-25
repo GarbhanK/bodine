@@ -29,6 +29,7 @@ class Broker:
     port: int
     max_connections: int
     sock: socket.socket
+    partitions: int
     active_clients: ConnRegistry
     consumer_registry: ConsumerGroupRegistry
     pigdb: PIGDB
@@ -37,10 +38,12 @@ class Broker:
         self.host = cfg.host
         self.port = cfg.port
         self.max_connections = cfg.max_connections
+        self.partitions = cfg.partitions
         self.active_clients = ConnRegistry()
         self.consumer_registry = ConsumerGroupRegistry()
         self.pigdb = PIGDB()
 
+        # populate the consumer registry with the provided consumer groups
         self.consumer_registry._seed_groups(cfg.consumer_groups)
 
     def __repr__(self) -> str:
@@ -104,20 +107,29 @@ class Broker:
     def handle_connection(self, client: Client, connection_message: Message) -> None:
         """Listen for incoming connections on the specified port."""
 
-        match connection_message.event:
-            case "subscribe":
-                if connection_message.group is None:
-                    raise ValueError("Consumer group is required")
+        # setup initial subscriber setup before handling socket stream in a loop
+        if connection_message.event == "subscribe":
+            if not connection_message.group:
+                raise ValueError("Consumer group is required")
 
-                self.handle_subscriber(
-                    client,
-                    topic=connection_message.topic,
-                    group=connection_message.group,
-                )
-            case "publish":
-                self.handle_publisher(client, topic=connection_message.topic)
-            case _:
-                raise ValueError(f"Unsupported event: {connection_message.event}")
+            # add client to the consumer registry
+            self.consumer_registry.add_consumer(
+                group_name=connection_message.group,
+                topic=connection_message.topic,
+                client_id=client.id,
+            )
+
+            self.handle_subscriber(
+                client,
+                topic=connection_message.topic,
+                group=connection_message.group,
+            )
+        elif connection_message.event == "publish":
+            self.handle_publisher(client, topic=connection_message.topic)
+        else:
+            logger.error(
+                f"Unsupported event: {connection_message.event}. Closing connection..."
+            )
 
         # client socket disconnect
         self.active_clients.remove_client(client.id)
@@ -147,7 +159,7 @@ class Broker:
                 event=message_content.get("event", ""),
                 topic=message_content.get("topic", ""),
                 content=message_content.get("content", ""),
-                group=message_content.get("group"),
+                group=message_content.get("group", ""),
             )
         except ValueError as e:
             raise ValueError(f"Invalid message content: {e}")
@@ -167,16 +179,16 @@ class Broker:
         return buf
 
     def handle_publisher(self, client: Client, topic: str) -> None:
-        """Publish a message to the topic"""
+        """Publish messages to the topic"""
 
-        print(f"Handling publisher client: {client.id}")
+        logger.info(f"Handling publisher client: {client.id}")
         while client.alive:
             message: Message | None = self._recv_message(client.conn)
             if message is None:
                 client.alive = False
                 continue
 
-            print(f"Received message: {message}")
+            logger.info(f"Received: {message}")
 
             # insert message into the database
             # future version will append to the WAL
@@ -201,7 +213,7 @@ class Broker:
                 self.consumer_registry.add_topic(group, topic)
 
             # get client's offset from the consumer group registry
-            offset: int = self.consumer_registry.lookup(group, topic)
+            offset: int = self.consumer_registry.lookup(group, topic, client.id)
 
             # topic_offset: int = client.offsets[topic]
             # topic_size: int = self.pigdb.get_topic_size(topic)
@@ -230,7 +242,7 @@ class Broker:
             offset_message: Message = self.pigdb.get(topic, offset)
 
             # increment client offset by 1 for the next poll request
-            self.consumer_registry.increment(group, topic)
+            self.consumer_registry.increment(group, topic, client.id)
 
             # respond to the client with the offset message
             self.send_poll_response(

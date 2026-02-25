@@ -54,14 +54,14 @@ python examples/consume.py
 ## Checklist
 
 ### Milestone 1 — Single node, in-memory, Docker demo
-- [ ] TCP server that accepts producer and consumer connections
-- [ ] Length-prefixed JSON framing (encode/decode)
-- [ ] In-memory topic and message store
-- [ ] `PRODUCE` command: write message to topic
-- [ ] `CONSUME` command: read message at offset from topic
+- [x] TCP server that accepts producer and consumer connections
+- [x] Length-prefixed JSON framing (encode/decode)
+- [x] In-memory topic and message store
+- [x] `publish` command: write message to topic
+- [x] `subscribe` command: read message at offset from topic
 - [ ] Python client library with `Producer` and `Consumer` classes
-- [ ] `examples/produce.py` — sends a message to a topic
-- [ ] `examples/consume.py` — polls and prints messages
+- [x] `examples/produce.py` — sends a message to a topic
+- [x] `examples/consume.py` — polls and prints messages
 - [ ] `docker-compose.yml` with broker, producer, and consumer containers
 
 ### Milestone 2 — Persistence
