@@ -44,7 +44,7 @@ class Broker:
         self.pigdb = PIGDB()
 
         # populate the consumer registry with the provided consumer groups
-        self.consumer_registry._seed_groups(cfg.consumer_groups)
+        self.consumer_registry.seed_groups(cfg.consumer_groups)
 
     def __repr__(self) -> str:
         return f"Broker@{self.host}:{self.port}"
@@ -80,6 +80,7 @@ class Broker:
                 continue
 
             # add client to registry of active clients
+            # TODO: assign partition to the client
             client: Client = Client(conn=conn)
             self.active_clients.add_client(client)
 
@@ -116,7 +117,7 @@ class Broker:
             self.consumer_registry.add_consumer(
                 group_name=connection_message.group,
                 topic=connection_message.topic,
-                client_id=client.id,
+                partition=client.partition,
             )
 
             self.handle_subscriber(
@@ -125,7 +126,7 @@ class Broker:
                 group=connection_message.group,
             )
         elif connection_message.event == "publish":
-            self.handle_publisher(client, topic=connection_message.topic)
+            self.handle_publisher(client)
         else:
             logger.error(
                 f"Unsupported event: {connection_message.event}. Closing connection..."
@@ -178,7 +179,7 @@ class Broker:
             buf += chunk
         return buf
 
-    def handle_publisher(self, client: Client, topic: str) -> None:
+    def handle_publisher(self, client: Client) -> None:
         """Publish messages to the topic"""
 
         logger.info(f"Handling publisher client: {client.id}")
@@ -213,23 +214,9 @@ class Broker:
                 self.consumer_registry.add_topic(group, topic)
 
             # get client's offset from the consumer group registry
-            offset: int = self.consumer_registry.lookup(group, topic, client.id)
+            offset: int = self.consumer_registry.lookup(group, topic, client.partition)
 
-            # topic_offset: int = client.offsets[topic]
-            # topic_size: int = self.pigdb.get_topic_size(topic)
-
-            # Raise an error if the offset is greater than the topic size
-            # if topic_offset > topic_size:
-            #     raise ValueError(
-            #         f"Invalid Offset: offset {topic_offset} is greater than topic size {topic_size}"
-            #     )
-
-            # if subscriber is at the end of the topic, tell them to wait for new messages
-            # print(f"{topic_offset=}, {topic_size=}")
-
-            end_of_topic = offset >= self.pigdb.get_topic_size(topic)
-
-            if end_of_topic:
+            if offset >= self.pigdb.get_topic_size(topic):
                 resp = Message(
                     event="poll_response", topic=topic, group=group, content=""
                 )
@@ -242,7 +229,7 @@ class Broker:
             offset_message: Message = self.pigdb.get(topic, offset)
 
             # increment client offset by 1 for the next poll request
-            self.consumer_registry.increment(group, topic, client.id)
+            self.consumer_registry.increment(group, topic, client.partition)
 
             # respond to the client with the offset message
             self.send_poll_response(

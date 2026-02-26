@@ -11,6 +11,7 @@ class Client:
     conn: socket.socket = field(default_factory=socket.socket)
     alive: bool = True
     group: str | None = None
+    partition: int = 0
 
     def __post_init__(self):
         self.id = str(uuid.uuid4())
@@ -20,8 +21,14 @@ class Client:
 sample = {
     "name": "group1",
     "topics": {
-        "default": {"<client_id1>": 0, "<client_id2>": 0},
-        "greetings": {"<client_id1>": 0, "<client_id2>": 0},
+        "default": {
+            0: 4,
+            1: 3,
+        },
+        "greetings": {
+            0: 0,
+            1: 2,
+        },
     },
 }
 """
@@ -29,14 +36,26 @@ sample = {
 
 @dataclass
 class ConsumerGroup:
+    """Single unit of subscription to a topic
+    Given an consumer group 'billing-service' with topics ['orders', 'purchases']
+    (group) billing-service
+        -> (topic) orders
+            -> (partition) 0 -> offset no.
+            -> (partition) 1 -> offset no.
+        -> (topic) purchases
+            -> (partition) 0 -> offset no.
+            -> (partition) 1 -> offset no.
+
+    """
+
     name: str
-    topics: dict[str, dict[str, int]] = field(default_factory=dict)
+    topics: dict[str, dict[int, int]] = field(default_factory=dict)
 
     def __post_init__(self):
         self.topics = {topic: {} for topic in self.topics}
 
-    def get_offset(self, topic: str, client_id: str) -> int:
-        return self.topics[topic].get(client_id, 0)
+    def get_offset(self, topic: str, partition: int) -> int:
+        return self.topics[topic].get(partition, 0)
 
 
 @dataclass
@@ -44,16 +63,16 @@ class ConsumerGroupRegistry:
     _groups: dict[str, ConsumerGroup] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def _seed_groups(self, consumer_groups: list[str]):
+    def seed_groups(self, consumer_groups: list[str], partitions: int):
         with self._lock:
             for group_name in consumer_groups:
                 self._groups[group_name] = ConsumerGroup(name=group_name)
 
-    def add_consumer(self, group_name: str, topic: str, client_id: str) -> None:
+    def add_consumer(self, group_name: str, topic: str, partition: int) -> None:
         with self._lock:
             if self._groups[group_name].topics.get(topic):
-                self._groups[group_name].topics[topic][client_id] = 0
-                print(f"DEBUG! added consumer to {group_name}/{topic}: {client_id}")
+                self._groups[group_name].topics[topic][partition] = 0
+                print(f"DEBUG! added consumer to {group_name}/{topic}/{partition}")
 
     def add_group(self, group_name: str, topics: list[str]) -> None:
         with self._lock:
@@ -71,7 +90,7 @@ class ConsumerGroupRegistry:
         with self._lock:
             return list(self._groups[group_name].topics.keys())
 
-    def lookup(self, group_name: str, topic: str, client_id: str) -> int:
+    def lookup(self, group_name: str, topic: str, parition: int) -> int:
         """Returns the corresponding offset for a group"""
 
         with self._lock:
@@ -81,10 +100,10 @@ class ConsumerGroupRegistry:
                     f"Subscriber group {group_name} not found in the registry"
                 )
 
-            offset: int = group_info.get_offset(topic, client_id)
+            offset: int = group_info.get_offset(topic, parition)
             return offset
 
-    def increment(self, group_name: str, topic: str, client_id: str) -> None:
+    def increment(self, group_name: str, topic: str, partition: int) -> None:
         """Increments the offset for a group"""
         with self._lock:
             group_info: ConsumerGroup | None = self._groups.get(group_name)
@@ -92,7 +111,9 @@ class ConsumerGroupRegistry:
                 raise ValueError(
                     f"Subscriber group {group_name} not found in the registry"
                 )
-            group_info.topics[topic][client_id] += 1
+
+            # if not group_info.topics[topic].get(partition):
+            group_info.topics[topic][partition] += 1
 
 
 @dataclass
