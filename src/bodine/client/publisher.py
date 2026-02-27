@@ -32,7 +32,7 @@ class Publisher(ClientBase):
         self.sock.sendall(connection_message)
 
     def send(self, message: str) -> None:
-        print(f"Sending message '{message}' to topic '{self.topic}'...")
+        print(f"Sending message '{message}' to '{self.topic}'...")
         try:
             self.sock.sendall(self._build_payload(message))
         except Exception as e:

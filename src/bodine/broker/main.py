@@ -18,10 +18,14 @@ def main() -> None:
         host="127.0.0.1",
         port=PORT,
         max_connections=MAX_CONNECTIONS,
+        partitions=2,
+        location="/tmp/bodine",
+        topics=["topic1", "topic2"],
         consumer_groups=["default", "group1"],
     )
     broker = Broker(cfg)
-    broker.setup()
+    broker.setup_listener()
+    broker.setup_consumer_groups()
 
     try:
         broker.accept_connections()

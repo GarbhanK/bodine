@@ -1,3 +1,6 @@
+HEADER_SIZE: int = 4
+
+
 class ShutdownException(Exception):
     pass
 

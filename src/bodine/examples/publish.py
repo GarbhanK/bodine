@@ -5,7 +5,7 @@ import time
 from bodine.client.publisher import Publisher
 
 try:
-    p = Publisher(broker="localhost:9001", topic="greetings")
+    p = Publisher(broker="localhost:9001", topic="topic1")
 except ConnectionRefusedError as e:
     print(f"Connection refused: {e}")
     sys.exit(1)
@@ -13,7 +13,7 @@ except ConnectionRefusedError as e:
 print(f"Producer created: {p}")
 
 message = json.dumps(
-    {"event": "publish", "topic": "greetings", "content": "hello, world!"}
+    {"event": "publish", "topic": "topic1", "content": "hello, world!"}
 )
 
 print(message)

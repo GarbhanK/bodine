@@ -14,65 +14,157 @@ Each record in the log is encoded the same way as the TCP messages, the file is 
 
 """
 
+import json
+import os
+import struct
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from bodine.broker.models import Message
+# from bodine.broker.models import Message
+from bodine.broker.utils import HEADER_SIZE
 
 
+@dataclass
+class WAL:
+    topic: str
+    partition: int
+    fpath: Path
+    # fd: int  # TODO: is this only set/lasts as long as file is open? Useful as id?
+    end_offset: int = 0
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def __post_init__(self):
+        # create file if not exists
+        if not self.fpath.exists():
+            self.fpath.touch()
+
+        print(f"WAL file created at {self.fpath}!")
+
+    def append(self, data: bytes) -> None:
+        """Append raw bytes data to the log"""
+        with self._lock:
+            # 'append bytes' mode will create a file if none is present
+            with open(self.fpath, mode="ab") as f:
+                f.write(data)
+
+    def read_from(self, offset: int) -> dict:
+        with self._lock:
+            # brainstorming
+            # index x messages (length-encoded json) into the bytes
+            # naive -> open file, iterate sequentially by reading length-encoding then jumping past content
+            #          n_skipped is the offset, once we match input arg we read content bytes and return
+            # This sounds really slow and un-scalable but it might be what index files fix, that's for later
+
+            # file index for offset tracking, +1 for each complete header+message in the log
+            file_idx: int = 0
+
+            with open(self.fpath, "rb") as f:
+                while file_idx < offset:
+                    # get the length of the next message
+                    raw_length: bytes = f.read(HEADER_SIZE)
+                    length: int = struct.unpack(">I", raw_length)[0]
+
+                    # skip the message content
+                    f.seek(length, os.SEEK_CUR)
+
+                    # increment file index
+                    file_idx += 1
+
+                # when we reach desired offset, read the message content
+                if file_idx != offset:
+                    raise ValueError(f"Offset {offset} is out of range")
+
+                # read the message content
+                target_message_len_raw: bytes = f.read(HEADER_SIZE)
+                target_message_length: int = struct.unpack(
+                    ">I", target_message_len_raw
+                )[0]
+                raw_target_payload: bytes = f.read(target_message_length)
+
+                try:
+                    message_content: dict = json.loads(
+                        raw_target_payload.decode("utf-8")
+                    )
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"Invalid JSON payload: {e}")
+
+                return message_content
+
+
+# TODO: redundant?
 @dataclass
 class Topic:
     name: str
-    length: int = 0
-    messages: list[Message] = field(default_factory=list)
+    partitions: dict[int, WAL] = field(default_factory=dict)
+    # messages: list[Message] = field(default_factory=list)
 
 
 @dataclass
-class PIGDB:
+class Storage:
+    n_partitions: int
+    location: str
+
     _topics: dict[str, Topic] = field(default_factory=dict)
-    _lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def insert(self, message: Message) -> None:
-        with self._lock:
-            if message.topic not in self._topics:
-                self._topics[message.topic] = Topic(name=message.topic)
+    def setup(self, topics: list[str]) -> None:
+        for topic in topics:
+            self._topics[topic] = Topic(name=topic)
 
-            # append message to the topic's messages list (soon to be WAL)
-            self._topics[message.topic].messages.append(message)
+            for i in range(self.n_partitions):
+                wal_path: str = f"{topic}-{i}.wal"
+                self._topics[topic].partitions[i] = WAL(
+                    topic=topic, partition=i, fpath=Path(wal_path)
+                )
+                print(f"File created: {wal_path}")
 
-            # update the topic's length
-            self._topics[message.topic].length += 1
+    def insert(self, topic: str, partition: int, message: bytes) -> None:
+        # add message to the end of the WAL
+        self._topics[topic].partitions[partition].append(message)
 
-    def get(self, topic: str, offset: int) -> Message:
-        with self._lock:
-            # TODO: Re-think the logic for handling invalid topics and offsets
-            # for now we create the topic if it doesn't exist
-            if topic not in self._topics:
-                self._topics[topic] = Topic(name=topic)
+        # update the end offset (i.e length) of the partition
+        self._topics[topic].partitions[partition].end_offset += 1
 
-            topic_data: Topic = self._topics[topic]
+    def get(self, topic: str, partition: int, offset: int) -> dict:
+        return self._topics[topic].partitions[partition].read_from(offset)
 
-            return topic_data.messages[offset]
-
-    def get_all(self, topic: str) -> list[Message]:
-        with self._lock:
-            return self._topics[topic].messages
-
-    def get_topic_size(self, topic: str) -> int:
-        with self._lock:
-            if topic not in self._topics:
-                return 0
-            return self._topics[topic].length
+    def get_partition_size(self, topic: str, partition: int) -> int:
+        return self._topics[topic].partitions[partition].end_offset
 
 
-class WAL:
-    def __init__(self, path: Path) -> None:
-        self.path = path
+# @dataclass
+# class PIGDB:
+#     _topics: dict[str, Topic] = field(default_factory=dict)
+#     _lock: threading.Lock = field(default_factory=threading.Lock)
 
-        if not self.path.exists():
-            self.path.mkdir(parents=True)
+#     def insert(self, message: Message) -> None:
+#         with self._lock:
+#             if message.topic not in self._topics:
+#                 self._topics[message.topic] = Topic(name=message.topic)
 
-    def append(self, data: bytes) -> int:
-        """Add data to the log and return the offset of the new record"""
-        raise NotImplementedError()
+#             # append message to the topic's messages list (soon to be WAL)
+#             self._topics[message.topic].messages.append(message)
+
+#             # update the topic's length
+#             self._topics[message.topic].length += 1
+
+#     def get(self, topic: str, offset: int) -> Message:
+#         with self._lock:
+#             # TODO: Re-think the logic for handling invalid topics and offsets
+#             # for now we create the topic if it doesn't exist
+#             if topic not in self._topics:
+#                 self._topics[topic] = Topic(name=topic)
+
+#             topic_data: Topic = self._topics[topic]
+
+#             return topic_data.messages[offset]
+
+#     def get_all(self, topic: str) -> list[Message]:
+#         with self._lock:
+#             return self._topics[topic].messages
+
+#     def get_topic_size(self, topic: str) -> int:
+#         with self._lock:
+#             if topic not in self._topics:
+#                 return 0
+#             return self._topics[topic].length

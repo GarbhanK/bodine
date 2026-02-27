@@ -9,7 +9,9 @@ from typing import Any, Callable
 from bodine.broker import logs
 from bodine.broker.models import Client, ConnRegistry, ConsumerGroupRegistry, Message
 from bodine.broker.utils import ClientDisconnected
-from bodine.broker.wal import PIGDB
+
+# from bodine.broker.wal import PIGDB
+from bodine.broker.wal import Storage
 
 logs.setup_logging()
 logger = logging.getLogger(__name__)
@@ -20,7 +22,9 @@ class BrokerConfig:
     host: str
     port: int
     max_connections: int
+    location: str
     partitions: int = 1
+    topics: list[str] = field(default_factory=list)
     consumer_groups: list[str] = field(default_factory=list)
 
 
@@ -30,26 +34,39 @@ class Broker:
     max_connections: int
     sock: socket.socket
     partitions: int
+    topics: list[str]
     active_clients: ConnRegistry
     consumer_registry: ConsumerGroupRegistry
-    pigdb: PIGDB
+    # pigdb: PIGDB
+    storage: Storage
 
     def __init__(self, cfg: BrokerConfig):
         self.host = cfg.host
         self.port = cfg.port
         self.max_connections = cfg.max_connections
         self.partitions = cfg.partitions
+        self.topics = cfg.topics
         self.active_clients = ConnRegistry()
         self.consumer_registry = ConsumerGroupRegistry()
-        self.pigdb = PIGDB()
+        # self.pigdb = PIGDB()
+        self.storage = Storage(
+            cfg.partitions,
+            cfg.location,
+        )
 
         # populate the consumer registry with the provided consumer groups
-        self.consumer_registry.seed_groups(cfg.consumer_groups)
+        self.consumer_registry.seed_groups(
+            cfg.consumer_groups, cfg.topics, cfg.partitions
+        )
+        logger.info(self.consumer_registry)
+
+        # setup storage and create partition WAL files for each topic
+        self.storage.setup(cfg.topics)
 
     def __repr__(self) -> str:
         return f"Broker@{self.host}:{self.port}"
 
-    def setup(self) -> None:
+    def setup_listener(self) -> None:
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         except socket.error as e:
@@ -62,6 +79,9 @@ class Broker:
         # put socket into listening mode
         self.sock.listen(self.max_connections)
         logger.info("Socket is listening...")
+
+    def setup_consumer_groups(self) -> None:
+        pass
 
     def accept_connections(self) -> None:
         while True:
@@ -80,23 +100,28 @@ class Broker:
                 continue
 
             # add client to registry of active clients
-            # TODO: assign partition to the client
             client: Client = Client(conn=conn)
             self.active_clients.add_client(client)
 
-            # parse the connection message
-            connection_message: Message | None = self._recv_message(sock=client.conn)
-            logger.info(f"Connection message: {connection_message}")
+            # TODO: assign partition to the client and rebalance if needed
 
-            if connection_message is None:
+            # parse the connection message
+            raw_conn_event: tuple[bytes, bytes] | None = self._recv_message(
+                sock=client.conn
+            )
+            logger.info(f"Connection message: {raw_conn_event}")
+            if raw_conn_event is None:
                 raise ValueError("Invalid connection message")
 
-            thread_prefix: str = "S" if connection_message.event == "subscribe" else "P"
+            raw_header, raw_payload = raw_conn_event
+            conn_event: Message = self._parse_message(raw_payload)
+
+            thread_prefix: str = "S" if conn_event.event == "subscribe" else "P"
             thread_name: str = f"{thread_prefix}::{client.id}"
             self._spawn_worker_thread(
                 name=thread_name,
                 func=self.handle_connection,
-                args=(client, connection_message),
+                args=(client, conn_event),
             )
 
     # TODO: look into tracking threads as part of the broker class?
@@ -126,7 +151,7 @@ class Broker:
                 group=connection_message.group,
             )
         elif connection_message.event == "publish":
-            self.handle_publisher(client)
+            self.handle_publisher(client, connection_message.topic)
         else:
             logger.error(
                 f"Unsupported event: {connection_message.event}. Closing connection..."
@@ -136,7 +161,7 @@ class Broker:
         self.active_clients.remove_client(client.id)
         client.conn.close()
 
-    def _recv_message(self, sock: socket.socket) -> Message | None:
+    def _recv_message(self, sock: socket.socket) -> tuple[bytes, bytes] | None:
         """Decode a message received from a client."""
         try:
             # length header is exactly 4 bytes
@@ -150,6 +175,10 @@ class Broker:
         except ClientDisconnected:
             return None
 
+        return (raw_length, raw_payload)
+
+    def _parse_message(self, raw_payload: bytes) -> Message:
+        """Parse a raw payload into a Message object."""
         try:
             message_content: dict = json.loads(raw_payload.decode("utf-8"))
         except json.JSONDecodeError as e:
@@ -173,34 +202,41 @@ class Broker:
 
         # the while loop logic handles the case where the socket is closed mid-message
         while len(buf) < n:
-            chunk = sock.recv(n - len(buf))
+            chunk: bytes = sock.recv(n - len(buf))
             if not chunk:
                 raise ClientDisconnected("Socket closed mid-message")
             buf += chunk
         return buf
 
-    def handle_publisher(self, client: Client) -> None:
+    def handle_publisher(self, client: Client, topic: str) -> None:
         """Publish messages to the topic"""
 
         logger.info(f"Handling publisher client: {client.id}")
         while client.alive:
-            message: Message | None = self._recv_message(client.conn)
-            if message is None:
+            # message: Message | None = self._recv_message(client.conn)
+            data: tuple[bytes, bytes] | None = self._recv_message(client.conn)
+            if data is None:
                 client.alive = False
                 continue
+
+            raw_header, raw_payload = data
+            message: Message = self._parse_message(raw_payload)
+            # message: Message = Message.from_bytes(raw_payload)
 
             logger.info(f"Received: {message}")
 
             # insert message into the database
             # future version will append to the WAL
-            self.pigdb.insert(message)
+            # self.pigdb.insert(message)
+            full_raw_message = raw_header + raw_payload
+            self.storage.insert(topic, client.partition, full_raw_message)
 
     def handle_subscriber(self, client: Client, topic: str, group: str) -> None:
         """Respond to the client with the offset message from the topic"""
 
         logger.info(f"Handling subscriber client: {client.id} ({group}@{topic})")
         while client.alive:
-            poll_message: Message | None = self._recv_message(client.conn)
+            poll_message: tuple[bytes, bytes] | None = self._recv_message(client.conn)
             if poll_message is None:
                 client.alive = False
                 continue
@@ -211,22 +247,27 @@ class Broker:
 
             # create a new offset if topic doesn't exist
             if topic not in self.consumer_registry.get_topics(group):
-                self.consumer_registry.add_topic(group, topic)
+                self.consumer_registry.add_topic(group, topic, self.partitions)
 
             # get client's offset from the consumer group registry
             offset: int = self.consumer_registry.lookup(group, topic, client.partition)
 
-            if offset >= self.pigdb.get_topic_size(topic):
-                resp = Message(
-                    event="poll_response", topic=topic, group=group, content=""
-                )
+            # if offset >= self.pigdb.get_topic_size(topic):
+            if offset >= self.storage.get_partition_size(topic, client.partition):
+                resp: dict = {
+                    "event": "poll_response",
+                    "topic": topic,
+                    "group": group,
+                    "content": "",
+                }
                 self.send_poll_response(
                     sock=client.conn, status="NO_NEW_MESSAGES", message=resp
                 )
                 continue
 
             # retrieve message from the database matching the offset
-            offset_message: Message = self.pigdb.get(topic, offset)
+            # offset_message: Message = self.pigdb.get(topic, offset)
+            offset_message: dict = self.storage.get(topic, client.partition, offset)
 
             # increment client offset by 1 for the next poll request
             self.consumer_registry.increment(group, topic, client.partition)
@@ -243,10 +284,12 @@ class Broker:
         return length_header + message.encode(encoding="utf-8")
 
     def send_poll_response(
-        self, sock: socket.socket, status: str, message: Message
+        self, sock: socket.socket, status: str, message: dict
     ) -> None:
         """Send a message to the client"""
-        payload: str = json.dumps({"status": status, "message": message.content})
+        payload: str = json.dumps(
+            {"status": status, "message": message.get("content", "")}
+        )
         print(f"Sending response: {payload}")
         full_response: bytes = self._build_payload(payload)
         sock.sendall(full_response)

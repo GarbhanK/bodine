@@ -3,7 +3,7 @@ import sys
 from bodine.client.subscriber import Subscriber
 
 try:
-    s = Subscriber(broker="localhost:9001", topic="greetings")
+    s = Subscriber(broker="localhost:9001", topic="topic1")
 except ConnectionRefusedError as e:
     print(f"Connection refused: {e}")
     sys.exit(1)
