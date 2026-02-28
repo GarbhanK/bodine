@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from bodine.broker import logs
-from bodine.broker.models import Client, ConnRegistry, ConsumerGroupRegistry, Message
+from bodine.broker.models import Client, ConnRegistry, ConsumerGroupRegistry, Event
 from bodine.broker.utils import HEADER_SIZE, ClientDisconnected
 from bodine.broker.wal import Storage
 
@@ -99,18 +99,18 @@ class Broker:
 
             # TODO: assign partition to the client and rebalance if needed
 
-            # parse the connection message
-            raw_conn_event: tuple[bytes, bytes] | None = self._recv_message(
+            # parse the connection event
+            raw_conn_event: tuple[bytes, bytes] | None = self._recv_event(
                 sock=client.conn
             )
-            logger.info(f"Connection message: {raw_conn_event}")
+            logger.info(f"Connection event: {raw_conn_event}")
             if raw_conn_event is None:
-                raise ValueError("Invalid connection message")
+                raise ValueError("Invalid connection event")
 
             raw_header, raw_payload = raw_conn_event
-            conn_event: Message = self._parse_message(raw_payload)
+            conn_event: Event = self._parse_event(raw_payload)
 
-            thread_prefix: str = "S" if conn_event.event == "subscribe" else "P"
+            thread_prefix: str = "S" if conn_event.type == "subscribe" else "P"
             thread_name: str = f"{thread_prefix}::{client.id}"
             self._spawn_worker_thread(
                 name=thread_name,
@@ -124,39 +124,37 @@ class Broker:
         thread = threading.Thread(name=name, target=func, args=args)
         thread.start()
 
-    def handle_connection(self, client: Client, connection_message: Message) -> None:
+    def handle_connection(self, client: Client, conn_event: Event) -> None:
         """Listen for incoming connections on the specified port."""
 
         # setup initial subscriber setup before handling socket stream in a loop
-        if connection_message.event == "subscribe":
-            if not connection_message.group:
+        if conn_event.type == "subscribe":
+            if not conn_event.group:
                 raise ValueError("Consumer group is required")
 
             # add client to the consumer registry
             self.consumer_registry.add_consumer(
-                group_name=connection_message.group,
-                topic=connection_message.topic,
+                group_name=conn_event.group,
+                topic=conn_event.topic,
                 partition=client.partition,
             )
 
             self.handle_subscriber(
                 client,
-                topic=connection_message.topic,
-                group=connection_message.group,
+                topic=conn_event.topic,
+                group=conn_event.group,
             )
-        elif connection_message.event == "publish":
-            self.handle_publisher(client, connection_message.topic)
+        elif conn_event.type == "publish":
+            self.handle_publisher(client, conn_event.topic)
         else:
-            logger.error(
-                f"Unsupported event: {connection_message.event}. Closing connection..."
-            )
+            logger.error(f"Unsupported event: {conn_event.type}. Closing connection...")
 
         # client socket disconnect
         self.active_clients.remove_client(client.id)
         client.conn.close()
 
-    def _recv_message(self, sock: socket.socket) -> tuple[bytes, bytes] | None:
-        """Decode a message received from a client."""
+    def _recv_event(self, sock: socket.socket) -> tuple[bytes, bytes] | None:
+        """Decode an event received from a client."""
         try:
             # length header is exactly 4 bytes
             raw_length: bytes = self._recv_exactly(sock, HEADER_SIZE)
@@ -174,24 +172,24 @@ class Broker:
         logger.debug(f"PAYLOAD: {raw_payload}")
         return (raw_length, raw_payload)
 
-    def _parse_message(self, raw_payload: bytes) -> Message:
-        """Parse a raw payload into a Message object."""
+    def _parse_event(self, raw_payload: bytes) -> Event:
+        """Parse a raw payload into an Event object."""
         try:
-            message_content: dict = json.loads(raw_payload.decode("utf-8"))
+            event_content: dict = json.loads(raw_payload.decode("utf-8"))
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON payload: {e}")
 
         try:
-            message = Message(
-                event=message_content.get("event", ""),
-                topic=message_content.get("topic", ""),
-                content=message_content.get("content", ""),
-                group=message_content.get("group", ""),
+            event = Event(
+                type=event_content.get("event", ""),
+                topic=event_content.get("topic", ""),
+                content=event_content.get("content", ""),
+                group=event_content.get("group", ""),
             )
         except ValueError as e:
-            raise ValueError(f"Invalid message content: {e}")
+            raise ValueError(f"Invalid event content: {e}")
 
-        return message
+        return event
 
     def _recv_exactly(self, sock, n: int) -> bytes:
         """Returns the exact amout of n bytes from the socket."""
@@ -210,27 +208,27 @@ class Broker:
 
         logger.info(f"Handling publisher client: {client.id}")
         while client.alive:
-            # message: Message | None = self._recv_message(client.conn)
-            data: tuple[bytes, bytes] | None = self._recv_message(client.conn)
+            data: tuple[bytes, bytes] | None = self._recv_event(client.conn)
             if data is None:
                 client.alive = False
                 continue
 
             raw_header, raw_payload = data
-            message: Message = self._parse_message(raw_payload)
-            logger.info(f"Received: {message}")
+            event: Event = self._parse_event(raw_payload)
+            logger.info(f"Received: {event}")
 
-            # append raw message to the WAL
-            full_raw_message: bytes = raw_header + raw_payload
-            self.storage.insert(topic, client.partition, full_raw_message)
+            # append raw event data to the WAL
+            full_event_raw: bytes = raw_header + raw_payload
+            self.storage.insert(topic, client.partition, full_event_raw)
 
     def handle_subscriber(self, client: Client, topic: str, group: str) -> None:
-        """Respond to the client with the offset message from the topic"""
+        """Respond to the client with the offset event from the topic"""
 
         logger.info(f"Handling subscriber client: {client.id} ({group}@{topic})")
+
         while client.alive:
-            poll_message: tuple[bytes, bytes] | None = self._recv_message(client.conn)
-            if poll_message is None:
+            poll_event: tuple[bytes, bytes] | None = self._recv_event(client.conn)
+            if poll_event is None:
                 client.alive = False
                 continue
 
@@ -245,13 +243,13 @@ class Broker:
 
             if offset >= self.storage.get_partition_size(topic, client.partition):
                 resp: dict = {
-                    "event": "poll_response",
+                    "type": "poll_response",
                     "topic": topic,
                     "group": group,
                     "content": "",
                 }
                 self.send_poll_response(
-                    sock=client.conn, status="NO_NEW_MESSAGES", message=resp
+                    sock=client.conn, status="NO_NEW_MESSAGES", event=resp
                 )
                 continue
 
@@ -262,9 +260,7 @@ class Broker:
             self.consumer_registry.increment(group, topic, client.partition)
 
             # respond to the client with the offset message
-            self.send_poll_response(
-                sock=client.conn, status="OK", message=offset_message
-            )
+            self.send_poll_response(sock=client.conn, status="OK", event=offset_message)
 
     def _build_payload(self, message: str) -> bytes:
         """Create a message with the topic and message. The message length is added to the first 4 bytes of the payload"""
@@ -272,12 +268,10 @@ class Broker:
         length_header: bytes = length.to_bytes(HEADER_SIZE, byteorder="big")
         return length_header + message.encode(encoding="utf-8")
 
-    def send_poll_response(
-        self, sock: socket.socket, status: str, message: dict
-    ) -> None:
+    def send_poll_response(self, sock: socket.socket, status: str, event: dict) -> None:
         """Send a message to the client"""
         payload: str = json.dumps(
-            {"status": status, "message": message.get("content", "")}
+            {"status": status, "message": event.get("content", "")}
         )
         logger.info(f"Sending response: {payload}")
         full_response: bytes = self._build_payload(payload)

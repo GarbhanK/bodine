@@ -21,7 +21,6 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# from bodine.broker.models import Message
 from bodine.broker.logs import get_logger
 from bodine.broker.utils import HEADER_SIZE
 

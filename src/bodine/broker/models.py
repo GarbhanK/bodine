@@ -1,22 +1,3 @@
-import datetime as dt
-import socket
-import threading
-import uuid
-from dataclasses import dataclass, field
-
-
-@dataclass
-class Client:
-    id: str = ""
-    conn: socket.socket = field(default_factory=socket.socket)
-    alive: bool = True
-    group: str | None = None
-    partition: int = 0
-
-    def __post_init__(self):
-        self.id = str(uuid.uuid4())
-
-
 """
 given...
 groups = [group1, group2]
@@ -51,30 +32,40 @@ n_partitions: 2
 }
 """
 
+import datetime as dt
+import socket
+import threading
+import uuid
+from dataclasses import dataclass, field
 
-# @dataclass
-# class ConsumerGroup:
-#     """Single unit of subscription to a topic
-#     Given an consumer group 'billing-service' with topics ['orders', 'purchases']
-#     (group) billing-service
-#         -> (topic) orders
-#             -> (partition) 0 -> offset no.
-#             -> (partition) 1 -> offset no.
-#         -> (topic) purchases
-#             -> (partition) 0 -> offset no.
-#             -> (partition) 1 -> offset no.
 
-#     """
+@dataclass
+class Client:
+    id: str = ""
+    conn: socket.socket = field(default_factory=socket.socket)
+    alive: bool = True
+    group: str | None = None
+    partition: int = 0
 
-#     name: str
-#     partitions: int
-#     topics: dict[str, dict[int, int]]
+    def __post_init__(self):
+        self.id = str(uuid.uuid4())
 
-#     # def __post_init__(self):
-#     #     self.topics = {topic: {} for topic in self.topics}
 
-#     def get_offset(self, topic: str, partition: int) -> int:
-#         return self.topics[topic].get(partition, 0)
+@dataclass
+class Event:
+    type: str
+    content: str
+    topic: str
+    group: str
+
+    # TODO: implement timestamp generation logic
+    timestamp: float = field(default_factory=dt.datetime.now().timestamp)
+
+    def __post_init__(self):
+        if not self.type:
+            raise ValueError("Event cannot be empty")
+        if not self.topic:
+            raise ValueError("Topic cannot be empty")
 
 
 @dataclass
@@ -178,20 +169,3 @@ class ConnRegistry:
         with self._lock:
             # TODO: implement rebalancing logic
             raise NotImplementedError()
-
-
-@dataclass
-class Message:
-    event: str
-    content: str
-    topic: str
-    group: str
-
-    # TODO: implement timestamp generation logic
-    timestamp: float = field(default_factory=dt.datetime.now().timestamp)
-
-    def __post_init__(self):
-        if not self.event:
-            raise ValueError("Event cannot be empty")
-        if not self.topic:
-            raise ValueError("Topic cannot be empty")
