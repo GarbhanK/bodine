@@ -131,6 +131,7 @@ class Storage:
     n_partitions: int
     location: str
 
+    _next_partition: int = 0
     _topics: dict[str, Topic] = field(default_factory=dict)
 
     def setup(self, topics: list[str]) -> None:

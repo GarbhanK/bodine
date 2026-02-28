@@ -66,7 +66,7 @@ python examples/consume.py
 
 ### Milestone 2 — Persistence
 - [ ] Append-only write-ahead log (WAL) per topic partition
-- [ ] Broker recovers topic state from disk on startup
+- [x] Broker recovers topic state from disk on startup
 - [ ] `fsync` strategy configurable (per-write vs. periodic)
 - [ ] Consumer offset is durable (stored to disk on commit)
 

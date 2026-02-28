@@ -33,20 +33,29 @@ n_partitions: 2
 }
 """
 
-import datetime as dt
+# import datetime as dt
 import socket
 import threading
 import uuid
 from dataclasses import dataclass, field
 
+from bodine.broker import logs
+
+logger = logs.get_logger(__name__)
+
 
 @dataclass
 class Client:
+    topic: str
     id: str = ""
     conn: socket.socket = field(default_factory=socket.socket)
-    alive: bool = True
+    # partition: int | None = None
+    # partitions: set[int] | None = (
+    #     None  # TODO: Consumer (client) can be assigned to multiple partitions
+    # )
     group: str | None = None
-    partition: int = 0
+    alive: bool = True
+    idle: bool = True
 
     def __post_init__(self):
         self.id = str(uuid.uuid4())
@@ -58,9 +67,10 @@ class Event:
     content: str
     topic: str
     group: str
+    key: str | None = None
 
     # TODO: implement timestamp generation logic
-    timestamp: float = field(default_factory=dt.datetime.now().timestamp)
+    # timestamp: float = field(default_factory=dt.datetime.now().timestamp)
 
     def __post_init__(self):
         if not self.type:
@@ -70,70 +80,102 @@ class Event:
 
 
 @dataclass
+class ConsumerGroup:
+    name: str
+    members: list[str] = field(default_factory=list)  # all client ids
+
+    # topic -> client_id -> partition
+    assignments: dict[str, dict[str, int]] = field(default_factory=dict)
+
+    # (topic, partition) -> commited offset
+    offsets: dict[tuple[str, int], int] = field(default_factory=dict)
+
+    def get_offset(self, topic: str, partition: int) -> int:
+        return self.offsets[(topic, partition)]
+
+    def get_client_partition(self, client_id: str, topic: str) -> int:
+        return self.assignments[topic][client_id]
+
+
+@dataclass
 class ConsumerGroupRegistry:
     """
     groups structure: dict[group_name, dict[topic, dict[partition, offset]]]
     """
 
-    _registry: dict[str, dict[str, dict[int, int]]] = field(default_factory=dict)
+    # _registry: dict[str, dict[str, dict[int, int]]] = field(default_factory=dict)
+    _registry: dict[str, ConsumerGroup] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def setup(self, groups: list[str], wal_info: dict) -> None:
-        """ """
+        """
+        wal_info: dict[str, dict[str, dict[int, int]]]
+                  group_name -> topic -> partition -> offset
+
+        assignments are set later when rebalancing. This function just sets up the ConsumerGroup objs
+
+        """
         for group_name in groups:
-            self._registry[group_name] = wal_info
+            self._registry[group_name] = ConsumerGroup(name=group_name)
+            topics: list[str] = [topic for topic in wal_info[group_name].keys()]
 
-    def add_consumer(self, group_name: str, topic: str, partition: int) -> None:
-        with self._lock:
-            if self._registry[group_name][topic].get(partition) is None:
-                raise ValueError(
-                    f"Partition {partition} does not exist for topic {topic}! (could be due to not implemented rebalancing logic?)"
-                )
-
-            # Get the consumer group's current offset for this partition and increment it by 1
-            group_offset: int = self._registry[group_name][topic][partition]
-            self._registry[group_name][topic][partition] = group_offset
-
-            print(f"Added consumer to {group_name}/{topic}/{partition}@{group_offset}")
-
-    def add_group(
-        self, group_name: str, topics: list[str], num_partitions: int
-    ) -> None:
-        with self._lock:
-            new_group = {}
             for topic in topics:
-                new_group = {topic: {n: 0} for n in range(num_partitions)}
+                # each topic maps cliend_ids->partition_no
+                self._registry[group_name].assignments[topic] = {}
 
-            self._registry[group_name] = new_group
-            print(f"Added group: {new_group}")
+                partitions: dict[int, int] = wal_info[group_name][topic]
 
-    def add_topic(self, group_name: str, topic: str, num_partitions: int) -> None:
+                # each offset (topic, partition)->offset
+                for partition in partitions:
+                    offset: int = wal_info[group_name][topic][partition]
+                    self._registry[group_name].offsets[(topic, partition)] = offset
+
+    def add_consumer(
+        self, client_id: str, group_name: str, topic: str, partition: int
+    ) -> None:
+        """Add a new consumer to a consumer group. Specify the topic"""
         with self._lock:
-            if self._registry[group_name].get(topic):
-                raise ValueError(
-                    f"Topic '{topic}' already exists for group '{group_name}'"
-                )
-            self._registry[group_name][topic] = {n: 0 for n in range(num_partitions)}
+            # make sure client_id is not already in the group
+            group_ids: list[str] = [
+                client_id
+                for client_id in self._registry[group_name].assignments[topic].keys()
+            ]
+            if client_id in group_ids:
+                raise ValueError("Client id already in this consumer group:")
+
+            # add consumer to client registry
+            # TODO: better to have this as None value by default, so we know what is missed by rebalancing?
+            self._registry[group_name].assignments[topic][client_id] = partition
+
+            logger.info(
+                f"Added consumer {client_id} to {group_name}/{topic}/{partition}"
+            )
 
     def get_topics(self, group_name: str) -> list[str]:
         with self._lock:
-            return list(self._registry[group_name].keys())
+            return list(self._registry[group_name].assignments.keys())
 
-    def lookup(self, group_name: str, topic: str, partition: int) -> int:
-        """Returns the corresponding offset for a group"""
-
+    def get_partition(self, client_id: str, topic: str, group_name: str) -> int:
         with self._lock:
-            if not self._registry.get(group_name):
+            partition: int = self._registry[group_name].get_client_partition(
+                client_id, topic
+            )
+            return partition
+
+    def lookup(self, client_id: str, group_name: str, topic: str) -> int:
+        """Returns the corresponding offset for a group"""
+        with self._lock:
+            cgroup: ConsumerGroup | None = self._registry.get(group_name)
+            if not cgroup:
                 raise ValueError(
                     f"Subscriber group {group_name} not found in the registry"
                 )
 
-            try:
-                offset: int = self._registry[group_name][topic][partition]
-            except KeyError as e:
-                raise ValueError(
-                    f"Unable to find offset under {group_name}/{topic}/{partition}: {e}"
-                ) from e
+            client_partition: int = cgroup.get_client_partition(
+                client_id=client_id, topic=topic
+            )
+
+            offset: int = cgroup.get_offset(topic, client_partition)
             return offset
 
     def increment(self, group_name: str, topic: str, partition: int) -> None:
@@ -144,7 +186,8 @@ class ConsumerGroupRegistry:
                     f"Subscriber group {group_name} not found in the registry"
                 )
 
-            self._registry[group_name][topic][partition] += 1
+            offset_idx: tuple[str, int] = (topic, partition)
+            self._registry[group_name].offsets[offset_idx] += 1
 
 
 @dataclass
@@ -155,18 +198,37 @@ class ConnRegistry:
     def add_client(self, client: Client) -> None:
         with self._lock:
             self._clients[client.id] = client
-            print(f"Client {client.id} added")
+            logger.info(f"Client {client.id} added")
 
     def remove_client(self, client_id: str) -> None:
         with self._lock:
             self._clients.pop(client_id, None)
-            print(f"Client {client_id} removed")
+            logger.info(f"Client {client_id} removed")
 
     def all_clients(self) -> list[Client]:
         with self._lock:
             return list(self._clients.values())
 
-    def rebalance_clients(self, num_partitions: int) -> None:
-        with self._lock:
-            # TODO: implement rebalancing logic
-            raise NotImplementedError()
+    # def rebalance(self, num_partitions: int) -> None:
+    #     """No need to thread lock because it is called upon accepting a connection, before
+    #     we create handler thread.
+    #     """
+    #     p_count: int = 0
+    #     for client_id, client_info in self._clients.items():
+    #         logger.debug(f"Rebalancing client {client_id}")
+    #         if client_info.partition is None:
+    #             # if all partitions have been assigned, mark client as idle and continue
+    #             if p_count >= num_partitions:
+    #                 logger.info(f"Reached max partitions: {p_count}/{num_partitions}")
+    #                 client_info.idle = True
+    #                 continue
+
+    #             logger.info(f"Assigning client {client_id} to partition {p_count}...")
+    #             # assign to next available partition, set idle to False and increment to next available partition
+    #             client_info.partition = p_count
+    #             client_info.idle = False
+    #             p_count += 1
+
+    #     logger.info(
+    #         f"Rebalanced {len(self._clients)} clients to {num_partitions} partitions"
+    #     )
