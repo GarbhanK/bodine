@@ -156,6 +156,21 @@ class Storage:
     def get_partition_size(self, topic: str, partition: int) -> int:
         return self._topics[topic].partitions[partition].end_offset
 
+    def get_wal_info(self) -> dict:
+        """Return a dict of group, topic, partiton and offset data
+        to set up the ConsumerRegistry. The consumer registry is seeded the same
+        across different groups, but the offsets are changed and tracked differently
+        as the broker processes events.
+        """
+
+        info = {}
+        for topic in self._topics:
+            info[topic] = {
+                partition: wal.end_offset
+                for partition, wal in self._topics[topic].partitions.items()
+            }
+        return info
+
 
 # NOTE: this was the old in-memory data store used when developing socket/TCP code.
 #       could still be useed for testing/debugging purposes. leaving it here for now.

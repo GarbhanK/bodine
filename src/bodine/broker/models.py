@@ -1,5 +1,6 @@
 """
-given...
+
+Example of ConsumerGroupRegistry layout given...
 groups = [group1, group2]
 topics = [topic1, topic2]
 n_partitions: 2
@@ -70,30 +71,30 @@ class Event:
 
 @dataclass
 class ConsumerGroupRegistry:
-    # _groups: dict[str, ConsumerGroup] = field(default_factory=dict)
-    _groups: dict[str, dict[str, dict[int, int]]] = field(default_factory=dict)
+    """
+    groups structure: dict[group_name, dict[topic, dict[partition, offset]]]
+    """
+
+    _registry: dict[str, dict[str, dict[int, int]]] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def __repr__(self):
-        return f"ConsumerGroupRegistry({self._groups})"
-
-    def seed_groups(
-        self, consumer_groups: list[str], topics: list[str], num_partitions: int
-    ):
-        with self._lock:
-            for group_name in consumer_groups:
-                self._groups[group_name] = {}
-                for topic in topics:
-                    partition_offset_map: dict[int, int] = {
-                        n: 0 for n in range(num_partitions)
-                    }
-                    self._groups[group_name][topic] = partition_offset_map
+    def setup(self, groups: list[str], wal_info: dict) -> None:
+        """ """
+        for group_name in groups:
+            self._registry[group_name] = wal_info
 
     def add_consumer(self, group_name: str, topic: str, partition: int) -> None:
         with self._lock:
-            if self._groups[group_name][topic].get(partition):
-                self._groups[group_name][topic][partition] = 0
-                print(f"DEBUG! added consumer to {group_name}/{topic}/{partition}")
+            if self._registry[group_name][topic].get(partition) is None:
+                raise ValueError(
+                    f"Partition {partition} does not exist for topic {topic}! (could be due to not implemented rebalancing logic?)"
+                )
+
+            # Get the consumer group's current offset for this partition and increment it by 1
+            group_offset: int = self._registry[group_name][topic][partition]
+            self._registry[group_name][topic][partition] = group_offset
+
+            print(f"Added consumer to {group_name}/{topic}/{partition}@{group_offset}")
 
     def add_group(
         self, group_name: str, topics: list[str], num_partitions: int
@@ -103,32 +104,32 @@ class ConsumerGroupRegistry:
             for topic in topics:
                 new_group = {topic: {n: 0} for n in range(num_partitions)}
 
-            self._groups[group_name] = new_group
+            self._registry[group_name] = new_group
             print(f"Added group: {new_group}")
 
     def add_topic(self, group_name: str, topic: str, num_partitions: int) -> None:
         with self._lock:
-            if self._groups[group_name].get(topic):
+            if self._registry[group_name].get(topic):
                 raise ValueError(
                     f"Topic '{topic}' already exists for group '{group_name}'"
                 )
-            self._groups[group_name][topic] = {n: 0 for n in range(num_partitions)}
+            self._registry[group_name][topic] = {n: 0 for n in range(num_partitions)}
 
     def get_topics(self, group_name: str) -> list[str]:
         with self._lock:
-            return list(self._groups[group_name].keys())
+            return list(self._registry[group_name].keys())
 
     def lookup(self, group_name: str, topic: str, partition: int) -> int:
         """Returns the corresponding offset for a group"""
 
         with self._lock:
-            if not self._groups.get(group_name):
+            if not self._registry.get(group_name):
                 raise ValueError(
                     f"Subscriber group {group_name} not found in the registry"
                 )
 
             try:
-                offset: int = self._groups[group_name][topic][partition]
+                offset: int = self._registry[group_name][topic][partition]
             except KeyError as e:
                 raise ValueError(
                     f"Unable to find offset under {group_name}/{topic}/{partition}: {e}"
@@ -138,12 +139,12 @@ class ConsumerGroupRegistry:
     def increment(self, group_name: str, topic: str, partition: int) -> None:
         """Increments the offset for a group"""
         with self._lock:
-            if not self._groups.get(group_name):
+            if not self._registry.get(group_name):
                 raise ValueError(
                     f"Subscriber group {group_name} not found in the registry"
                 )
 
-            self._groups[group_name][topic][partition] += 1
+            self._registry[group_name][topic][partition] += 1
 
 
 @dataclass

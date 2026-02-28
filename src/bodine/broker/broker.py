@@ -48,14 +48,12 @@ class Broker:
             cfg.location,
         )
 
-        # populate the consumer registry with the provided consumer groups
-        self.consumer_registry.seed_groups(
-            cfg.consumer_groups, cfg.topics, cfg.partitions
-        )
-        logger.info(self.consumer_registry)
-
         # setup storage and create partition WAL files for each topic
         self.storage.setup(cfg.topics)
+
+        # setup consumer registry and seed it with info from the storage component
+        self.consumer_registry.setup(cfg.consumer_groups, self.storage.get_wal_info())
+        logger.debug(f"broker init: {self.consumer_registry}")
 
     def __repr__(self) -> str:
         return f"Broker@{self.host}:{self.port}"
@@ -107,7 +105,7 @@ class Broker:
             raw_header, raw_payload = raw_conn_event
             conn_event: Event = self._parse_event(raw_payload)
 
-            thread_prefix: str = "S" if conn_event.type == "subscribe" else "P"
+            thread_prefix: str = "S" if conn_event.type == "SUBSCRIBE" else "P"
             thread_name: str = f"{thread_prefix}::{client.id}"
             self._spawn_worker_thread(
                 name=thread_name,
@@ -125,10 +123,12 @@ class Broker:
         """Listen for incoming connections on the specified port."""
 
         # setup initial subscriber setup before handling socket stream in a loop
-        if conn_event.type == "subscribe":
+        if conn_event.type == "SUBSCRIBE":
             if not conn_event.group:
                 raise ValueError("Consumer group is required")
 
+            logger.debug(f"Consumer reg: {self.consumer_registry}")
+            logger.debug(f"Client: {client}")
             # add client to the consumer registry
             self.consumer_registry.add_consumer(
                 group_name=conn_event.group,
@@ -136,12 +136,13 @@ class Broker:
                 partition=client.partition,
             )
 
+            logger.debug(self.consumer_registry)
             self.handle_subscriber(
                 client,
                 topic=conn_event.topic,
                 group=conn_event.group,
             )
-        elif conn_event.type == "publish":
+        elif conn_event.type == "PUBLISH":
             self.handle_publisher(client, conn_event.topic)
         else:
             logger.error(f"Unsupported event: {conn_event.type}. Closing connection...")
@@ -165,8 +166,8 @@ class Broker:
         except ClientDisconnected:
             return None
 
-        logger.debug(f"HEADER: {raw_length}")
-        logger.debug(f"PAYLOAD: {raw_payload}")
+        # logger.debug(f"HEADER: {raw_length}")
+        # logger.debug(f"PAYLOAD: {raw_payload}")
         return (raw_length, raw_payload)
 
     def _parse_event(self, raw_payload: bytes) -> Event:

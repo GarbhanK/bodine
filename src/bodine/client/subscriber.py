@@ -26,7 +26,7 @@ class Subscriber(ClientBase):
         print("Sending initial connection request...")
         payload: str = json.dumps(
             {
-                "event": "subscribe",
+                "event": "SUBSCRIBE",
                 "topic": self.topic,
                 "group": "default",
                 "content": "",

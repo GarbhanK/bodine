@@ -14,6 +14,6 @@ print(f"Producer created: {pub}")
 
 for i in range(3):
     pub.send(
-        json.dumps({"event": "publish", "topic": "topic1", "content": f"hello {i}!"})
+        json.dumps({"event": "PUBLISH", "topic": "topic1", "content": f"hello {i}!"})
     )
     time.sleep(0.5)

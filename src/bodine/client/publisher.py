@@ -24,7 +24,7 @@ class Publisher(ClientBase):
         payload: str = json.dumps(
             {
                 "topic": self.topic,
-                "event": "publish",
+                "event": "PUBLISH",
                 "content": "",
             }
         )
