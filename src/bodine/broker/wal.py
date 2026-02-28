@@ -134,13 +134,19 @@ class Storage:
     _topics: dict[str, Topic] = field(default_factory=dict)
 
     def setup(self, topics: list[str]) -> None:
+        wal_dir = Path(self.location)
+
+        if not wal_dir.exists():
+            wal_dir.mkdir(parents=True)
+            logger.info(f"Created WAL directory: {wal_dir}")
+
         for topic in topics:
             self._topics[topic] = Topic(name=topic)
 
             for i in range(self.n_partitions):
-                wal_path: str = f"{topic}-{i}.wal"
+                wal_path: Path = Path(self.location) / f"{topic}-{i}.wal"
                 self._topics[topic].partitions[i] = WAL(
-                    topic=topic, partition=i, fpath=Path(wal_path)
+                    topic=topic, partition=i, fpath=wal_path
                 )
 
     def insert(self, topic: str, partition: int, message: bytes) -> None:

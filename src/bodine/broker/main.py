@@ -16,7 +16,7 @@ def main() -> None:
         port=PORT,
         max_connections=MAX_CONNECTIONS,
         partitions=2,
-        location="/tmp/bodine",
+        location=".",
         topics=["topic1", "topic2"],
         consumer_groups=["default", "group1"],
     )
