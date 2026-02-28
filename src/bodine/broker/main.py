@@ -22,7 +22,6 @@ def main() -> None:
     )
     broker = Broker(cfg)
     broker.setup_listener()
-    broker.setup_consumer_groups()
 
     try:
         broker.accept_connections()

@@ -11,7 +11,6 @@ Every 'produce' call appends a record to the file and optionally calls `fsync` t
 
 Each record in the log is encoded the same way as the TCP messages, the file is just a sequence of those frames. Reading by offset requires scanning the whole file sequentially (slow) or maintaining a separate in-memory mapping offset numbers to byte positions in the file. Kafka keeps an index like that in `.index` files alongside `.log` segment files. For the first implementation we can just scan then worry about indexing later.
 
-
 """
 
 import json
@@ -37,11 +36,14 @@ class WAL:
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def __post_init__(self):
-        # create file if not exists
-        if not self.fpath.exists():
+        if self.fpath.exists():
+            # if file exists, set end offset to the partition size (so we don't replay all messages in the partition)
+            logger.info(f"WAL file exists at {self.fpath}, recovering topic state...")
+            self.end_offset = self._get_partition_size()
+        else:
+            # create file if not exists
             self.fpath.touch()
-
-        logger.info(f"WAL file created at {self.fpath}!")
+            logger.info(f"WAL file created at {self.fpath}!")
 
     def append(self, data: bytes) -> None:
         """Append raw bytes data to the log"""
@@ -93,13 +95,35 @@ class WAL:
 
                 return message_content
 
+    def _get_partition_size(self) -> int:
+        """Get the size (max offset) of the partition"""
+        file_idx: int = 0
+        end_of_log: bool = False
+
+        with open(self.fpath, "rb") as f:
+            while not end_of_log:
+                # get length of the next message
+                raw_length: bytes = f.read(HEADER_SIZE)
+                if not raw_length:
+                    end_of_log = True
+                    break
+
+                # get event content length and skip the event content
+                length: int = struct.unpack(">I", raw_length)[0]
+                f.seek(length, os.SEEK_CUR)
+
+                # increment file index for each event
+                file_idx += 1
+
+        logger.info(f"Partition size: {file_idx}")
+        return file_idx
+
 
 # TODO: redundant?
 @dataclass
 class Topic:
     name: str
     partitions: dict[int, WAL] = field(default_factory=dict)
-    # messages: list[Message] = field(default_factory=list)
 
 
 @dataclass
@@ -133,6 +157,9 @@ class Storage:
         return self._topics[topic].partitions[partition].end_offset
 
 
+# NOTE: this was the old in-memory data store used when developing socket/TCP code.
+#       could still be useed for testing/debugging purposes. leaving it here for now.
+#
 # @dataclass
 # class PIGDB:
 #     _topics: dict[str, Topic] = field(default_factory=dict)

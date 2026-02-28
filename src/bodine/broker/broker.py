@@ -74,9 +74,6 @@ class Broker:
         self.sock.listen(self.max_connections)
         logger.info("Socket is listening...")
 
-    def setup_consumer_groups(self) -> None:
-        pass
-
     def accept_connections(self) -> None:
         while True:
             try:

@@ -59,7 +59,7 @@ python examples/consume.py
 - [x] In-memory topic and message store
 - [x] `publish` command: write message to topic
 - [x] `subscribe` command: read message at offset from topic
-- [ ] Python client library with `Producer` and `Consumer` classes
+- [x] Python client library with `Producer` and `Consumer` classes
 - [x] `examples/produce.py` — sends a message to a topic
 - [x] `examples/consume.py` — polls and prints messages
 - [ ] `docker-compose.yml` with broker, producer, and consumer containers
