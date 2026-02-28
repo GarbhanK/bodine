@@ -1,13 +1,10 @@
-import logging
-
 from bodine.broker import logs
 from bodine.broker.broker import Broker, BrokerConfig
 
 PORT: int = 9001
 MAX_CONNECTIONS: int = 5
 
-logs.setup_logging()
-logger = logging.getLogger(__name__)
+logger = logs.get_logger(__name__)
 
 
 def main() -> None:

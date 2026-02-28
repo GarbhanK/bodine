@@ -22,7 +22,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 # from bodine.broker.models import Message
+from bodine.broker.logs import get_logger
 from bodine.broker.utils import HEADER_SIZE
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -39,7 +42,7 @@ class WAL:
         if not self.fpath.exists():
             self.fpath.touch()
 
-        print(f"WAL file created at {self.fpath}!")
+        logger.info(f"WAL file created at {self.fpath}!")
 
     def append(self, data: bytes) -> None:
         """Append raw bytes data to the log"""
@@ -116,7 +119,6 @@ class Storage:
                 self._topics[topic].partitions[i] = WAL(
                     topic=topic, partition=i, fpath=Path(wal_path)
                 )
-                print(f"File created: {wal_path}")
 
     def insert(self, topic: str, partition: int, message: bytes) -> None:
         # add message to the end of the WAL

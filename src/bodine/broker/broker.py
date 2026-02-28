@@ -1,5 +1,4 @@
 import json
-import logging
 import socket
 import struct
 import threading
@@ -8,13 +7,10 @@ from typing import Any, Callable
 
 from bodine.broker import logs
 from bodine.broker.models import Client, ConnRegistry, ConsumerGroupRegistry, Message
-from bodine.broker.utils import ClientDisconnected
-
-# from bodine.broker.wal import PIGDB
+from bodine.broker.utils import HEADER_SIZE, ClientDisconnected
 from bodine.broker.wal import Storage
 
-logs.setup_logging()
-logger = logging.getLogger(__name__)
+logger = logs.get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -37,7 +33,6 @@ class Broker:
     topics: list[str]
     active_clients: ConnRegistry
     consumer_registry: ConsumerGroupRegistry
-    # pigdb: PIGDB
     storage: Storage
 
     def __init__(self, cfg: BrokerConfig):
@@ -48,7 +43,6 @@ class Broker:
         self.topics = cfg.topics
         self.active_clients = ConnRegistry()
         self.consumer_registry = ConsumerGroupRegistry()
-        # self.pigdb = PIGDB()
         self.storage = Storage(
             cfg.partitions,
             cfg.location,
@@ -165,16 +159,19 @@ class Broker:
         """Decode a message received from a client."""
         try:
             # length header is exactly 4 bytes
-            raw_length: bytes = self._recv_exactly(sock, 4)
+            raw_length: bytes = self._recv_exactly(sock, HEADER_SIZE)
 
             # unpack big-endian unsigned int from the length header
             length: int = struct.unpack(">I", raw_length)[0]
 
             # Step 2: now read exactly that many bytes
             raw_payload: bytes = self._recv_exactly(sock, length)
+
         except ClientDisconnected:
             return None
 
+        logger.debug(f"HEADER: {raw_length}")
+        logger.debug(f"PAYLOAD: {raw_payload}")
         return (raw_length, raw_payload)
 
     def _parse_message(self, raw_payload: bytes) -> Message:
@@ -221,14 +218,10 @@ class Broker:
 
             raw_header, raw_payload = data
             message: Message = self._parse_message(raw_payload)
-            # message: Message = Message.from_bytes(raw_payload)
-
             logger.info(f"Received: {message}")
 
-            # insert message into the database
-            # future version will append to the WAL
-            # self.pigdb.insert(message)
-            full_raw_message = raw_header + raw_payload
+            # append raw message to the WAL
+            full_raw_message: bytes = raw_header + raw_payload
             self.storage.insert(topic, client.partition, full_raw_message)
 
     def handle_subscriber(self, client: Client, topic: str, group: str) -> None:
@@ -243,8 +236,6 @@ class Broker:
 
             logger.info(f"{topic}@{client.id} Poll recieved...")
 
-            # TODO: offset tracking should be per-subscriber-group, not coupled to the client id
-
             # create a new offset if topic doesn't exist
             if topic not in self.consumer_registry.get_topics(group):
                 self.consumer_registry.add_topic(group, topic, self.partitions)
@@ -252,7 +243,6 @@ class Broker:
             # get client's offset from the consumer group registry
             offset: int = self.consumer_registry.lookup(group, topic, client.partition)
 
-            # if offset >= self.pigdb.get_topic_size(topic):
             if offset >= self.storage.get_partition_size(topic, client.partition):
                 resp: dict = {
                     "event": "poll_response",
@@ -266,7 +256,6 @@ class Broker:
                 continue
 
             # retrieve message from the database matching the offset
-            # offset_message: Message = self.pigdb.get(topic, offset)
             offset_message: dict = self.storage.get(topic, client.partition, offset)
 
             # increment client offset by 1 for the next poll request
@@ -280,7 +269,7 @@ class Broker:
     def _build_payload(self, message: str) -> bytes:
         """Create a message with the topic and message. The message length is added to the first 4 bytes of the payload"""
         length = len(message)
-        length_header: bytes = length.to_bytes(4, byteorder="big")
+        length_header: bytes = length.to_bytes(HEADER_SIZE, byteorder="big")
         return length_header + message.encode(encoding="utf-8")
 
     def send_poll_response(
@@ -290,6 +279,6 @@ class Broker:
         payload: str = json.dumps(
             {"status": status, "message": message.get("content", "")}
         )
-        print(f"Sending response: {payload}")
+        logger.info(f"Sending response: {payload}")
         full_response: bytes = self._build_payload(payload)
         sock.sendall(full_response)

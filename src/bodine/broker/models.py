@@ -187,8 +187,8 @@ class Message:
     topic: str
     group: str
 
+    # TODO: implement timestamp generation logic
     timestamp: float = field(default_factory=dt.datetime.now().timestamp)
-    # sent: bool = field(default=False)
 
     def __post_init__(self):
         if not self.event:

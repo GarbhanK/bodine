@@ -79,6 +79,7 @@ class Subscriber(ClientBase):
         return response
 
     def poll(self, default_interval=3.0) -> Generator[dict]:
+        """ """
         print(f"Starting consumer for topic {self.topic} at {self.address}:{self.port}")
 
         interval: float = default_interval
