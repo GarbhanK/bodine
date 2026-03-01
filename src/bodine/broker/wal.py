@@ -37,18 +37,24 @@ class WAL:
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def __post_init__(self):
-        if self.fpath.exists():
-            # if file exists, set end offset to the partition size (so we don't replay all messages in the partition)
-            logger.info(f"WAL file exists at {self.fpath}, recovering topic state...")
-            logical_offset, byte_offset = self._get_partition_size()
-            self.end_offset = logical_offset
-        else:
-            # create file if not exists
+        if not self.fpath.exists():
             self.fpath.touch()
             logger.info(f"WAL file created at {self.fpath}!")
+            # if file exists, set end offset to the partition size (so we don't replay all messages in the partition)
+            # self.fd = os.open(self.fpath, os.O_RDWR)
+            # logical_offset, byte_offset = self._get_partition_size()
+            # self.end_offset = logical_offset
+        # else:
+        # create file if not exists
+        # self.fpath.touch()
+        # logger.info(f"WAL file created at {self.fpath}!")
+
+        self.fd = os.open(self.fpath, os.O_RDWR)
+
+        logical_offset, _ = self._get_partition_size()
+        self.end_offset = logical_offset
 
         # double check os.O_RDWR is the right flag. Maybe os.O_APPEND or os.O_FSYNC
-        self.fd = os.open(self.fpath, os.O_RDWR)
         if self.fd < 0:
             raise OSError(f"Failed to open WAL file {self.fpath}")
 

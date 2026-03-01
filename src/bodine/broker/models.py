@@ -107,28 +107,32 @@ class ConsumerGroupRegistry:
     _registry: dict[str, ConsumerGroup] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def setup(self, groups: list[str], wal_info: dict) -> None:
+    def setup(self, groups: list[str], wal_info: dict[str, dict[int, int]]) -> None:
         """
-        wal_info: dict[str, dict[str, dict[int, int]]]
-                  group_name -> topic -> partition -> offset
+        wal_info: dict[str, dict[int, int]]
+            topic -> partition -> offset
+
 
         assignments are set later when rebalancing. This function just sets up the ConsumerGroup objs
 
         """
+        logger.debug(f"{wal_info=}")
+        topics: list[str] = list(wal_info.keys())
+
         for group_name in groups:
             self._registry[group_name] = ConsumerGroup(name=group_name)
-            topics: list[str] = [topic for topic in wal_info[group_name].keys()]
+            logger.debug(f"{topics=}")
 
-            for topic in topics:
+            for topic_name in topics:
                 # each topic maps cliend_ids->partition_no
-                self._registry[group_name].assignments[topic] = {}
+                self._registry[group_name].assignments[topic_name] = {}
 
-                partitions: dict[int, int] = wal_info[group_name][topic]
+                partitions: dict[int, int] = wal_info[topic_name]
 
                 # each offset (topic, partition)->offset
                 for partition in partitions:
-                    offset: int = wal_info[group_name][topic][partition]
-                    self._registry[group_name].offsets[(topic, partition)] = offset
+                    offset: int = wal_info[topic_name][partition]
+                    self._registry[group_name].offsets[(topic_name, partition)] = offset
 
     def add_consumer(
         self, client_id: str, group_name: str, topic: str, partition: int
@@ -209,26 +213,28 @@ class ConnRegistry:
         with self._lock:
             return list(self._clients.values())
 
-    # def rebalance(self, num_partitions: int) -> None:
-    #     """No need to thread lock because it is called upon accepting a connection, before
-    #     we create handler thread.
-    #     """
-    #     p_count: int = 0
-    #     for client_id, client_info in self._clients.items():
-    #         logger.debug(f"Rebalancing client {client_id}")
-    #         if client_info.partition is None:
-    #             # if all partitions have been assigned, mark client as idle and continue
-    #             if p_count >= num_partitions:
-    #                 logger.info(f"Reached max partitions: {p_count}/{num_partitions}")
-    #                 client_info.idle = True
-    #                 continue
+    def rebalance_clients(self, num_partitions: int) -> None:
+        """No need to thread lock because it is called upon accepting a connection, before
+        we create handler thread.
+        """
+        logger.debug("NOT YET IMPLEMENTED")
+        logger.debug(f"{self._clients=}")
+        # p_count: int = 0
+        # for client_id, client_info in self._clients.items():
+        #     logger.debug(f"Rebalancing client {client_id}")
+        #     if client_info.partition is None:
+        #         # if all partitions have been assigned, mark client as idle and continue
+        #         if p_count >= num_partitions:
+        #             logger.info(f"Reached max partitions: {p_count}/{num_partitions}")
+        #             client_info.idle = True
+        #             continue
 
-    #             logger.info(f"Assigning client {client_id} to partition {p_count}...")
-    #             # assign to next available partition, set idle to False and increment to next available partition
-    #             client_info.partition = p_count
-    #             client_info.idle = False
-    #             p_count += 1
+        #         logger.info(f"Assigning client {client_id} to partition {p_count}...")
+        #         # assign to next available partition, set idle to False and increment to next available partition
+        #         client_info.partition = p_count
+        #         client_info.idle = False
+        #         p_count += 1
 
-    #     logger.info(
-    #         f"Rebalanced {len(self._clients)} clients to {num_partitions} partitions"
-    #     )
+        # logger.info(
+        #     f"Rebalanced {len(self._clients)} clients to {num_partitions} partitions"
+        # )

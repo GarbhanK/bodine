@@ -86,7 +86,7 @@ class Broker:
         #   if partitions with no clients are available, assign them to a client
         #   else, assign as a standby for existing partition (in sequence with lowest partition number first)
 
-        self.active_clients.rebalance(self.partitions)
+        self.active_clients.rebalance_clients(self.partitions)
         logger.debug(f"Rebalanced partitions: {self.active_clients}")
         pass
 
