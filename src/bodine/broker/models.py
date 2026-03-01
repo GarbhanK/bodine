@@ -217,7 +217,7 @@ class ConnRegistry:
         """No need to thread lock because it is called upon accepting a connection, before
         we create handler thread.
         """
-        logger.debug("NOT YET IMPLEMENTED")
+        logger.debug("REBALANCE NOT YET IMPLEMENTED")
         logger.debug(f"{self._clients=}")
         # p_count: int = 0
         # for client_id, client_info in self._clients.items():

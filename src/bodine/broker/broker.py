@@ -192,11 +192,6 @@ class Broker:
         """Respond to the client with the offset event from the topic"""
         logger.info(f"Handling subscriber client: {client.id} ({group}@{topic})")
 
-        # if client.partition is None:
-        #     raise ValueError(
-        #         f"Client should have an assigned partition number: {client}"
-        #     )
-
         # add client to the consumer registry
         self.consumer_registry.add_consumer(
             group_name=group,
@@ -210,11 +205,6 @@ class Broker:
             if poll_event is None:
                 client.alive = False
                 continue
-
-            # if client.partition is None:
-            #     raise ValueError(
-            #         f"Client should have an assigned partition number: {client}"
-            #     )
 
             logger.info(f"{topic}@{client.id} Poll recieved...")
 

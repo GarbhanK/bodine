@@ -40,14 +40,6 @@ class WAL:
         if not self.fpath.exists():
             self.fpath.touch()
             logger.info(f"WAL file created at {self.fpath}!")
-            # if file exists, set end offset to the partition size (so we don't replay all messages in the partition)
-            # self.fd = os.open(self.fpath, os.O_RDWR)
-            # logical_offset, byte_offset = self._get_partition_size()
-            # self.end_offset = logical_offset
-        # else:
-        # create file if not exists
-        # self.fpath.touch()
-        # logger.info(f"WAL file created at {self.fpath}!")
 
         self.fd = os.open(self.fpath, os.O_RDWR)
 
@@ -61,11 +53,21 @@ class WAL:
     def append(self, data: bytes) -> None:
         """Append raw bytes data to the log file"""
         with self._lock:
-            # write to file descriptor
+            # move file pointer to end of file to get most recent offset
+            start_offset: int = os.lseek(self.fd, 0, os.SEEK_END)
+
+            # map current logical offset to byte offset
+            self.offsets[self.end_offset] = start_offset
+
+            # write data to file descriptor
             os.write(self.fd, data)
 
             # increment end offset
             self.end_offset += 1
+            logger.debug(f"{self.offsets=}")
+
+            # flush the file descriptor to ensure data is written to disk
+            os.fsync(self.fd)
 
     def read_from(self, logical_offset: int) -> dict:
         with self._lock:
@@ -90,7 +92,7 @@ class WAL:
             return message_content
 
     def _get_partition_size(self) -> tuple[int, int]:
-        """Get the size (max offset) of the partition
+        """Get the size (max offset) of the partition. Run on WAL creation.
 
         Returns:
             dict[int, int]: A dictionary mapping logical offset to the byte offset.
@@ -128,7 +130,6 @@ class WAL:
         return logical_idx, byte_idx
 
 
-# TODO: redundant?
 @dataclass
 class Topic:
     name: str
