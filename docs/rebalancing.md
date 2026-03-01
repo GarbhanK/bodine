@@ -2,6 +2,10 @@
 
 This document is for figuring out how to rebalance clients and partitions.
 
+https://www.lydtechconsulting.com/blog/kafka-message-keys#:~:text=Topic%20Partitions,consume%20from%20all%20the%20partitions.
+
+https://medium.com/javarevisited/kafka-partitions-and-consumer-groups-in-6-mins-9e0e336c6c00
+
 1. consumer joins/leaves
 2. all consumers in the group stop fetching and commit current offsets
 3. broker recalculates partition assignments

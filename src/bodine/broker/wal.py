@@ -31,92 +31,95 @@ class WAL:
     topic: str
     partition: int
     fpath: Path
-    # fd: int  # TODO: is this only set/lasts as long as file is open? Useful as id?
     end_offset: int = 0
+    fd: int = -1
+    offsets: dict[int, int] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def __post_init__(self):
         if self.fpath.exists():
             # if file exists, set end offset to the partition size (so we don't replay all messages in the partition)
             logger.info(f"WAL file exists at {self.fpath}, recovering topic state...")
-            self.end_offset = self._get_partition_size()
+            logical_offset, byte_offset = self._get_partition_size()
+            self.end_offset = logical_offset
         else:
             # create file if not exists
             self.fpath.touch()
             logger.info(f"WAL file created at {self.fpath}!")
 
+        # double check os.O_RDWR is the right flag. Maybe os.O_APPEND or os.O_FSYNC
+        self.fd = os.open(self.fpath, os.O_RDWR)
+        if self.fd < 0:
+            raise OSError(f"Failed to open WAL file {self.fpath}")
+
     def append(self, data: bytes) -> None:
-        """Append raw bytes data to the log"""
+        """Append raw bytes data to the log file"""
         with self._lock:
-            # 'append bytes' mode will create a file if none is present
-            with open(self.fpath, mode="ab") as f:
-                f.write(data)
+            # write to file descriptor
+            os.write(self.fd, data)
 
-    def read_from(self, offset: int) -> dict:
+            # increment end offset
+            self.end_offset += 1
+
+    def read_from(self, logical_offset: int) -> dict:
         with self._lock:
-            # brainstorming
-            # index x messages (length-encoded json) into the bytes
-            # naive -> open file, iterate sequentially by reading length-encoding then jumping past content
-            #          n_skipped is the offset, once we match input arg we read content bytes and return
-            # This sounds really slow and un-scalable but it might be what index files fix, that's for later
+            byte_offset: int = self.offsets[logical_offset]
 
-            # file index for offset tracking, +1 for each complete header+message in the log
-            file_idx: int = 0
+            # seek to the byte offset in the file
+            os.lseek(self.fd, byte_offset, os.SEEK_SET)
 
-            with open(self.fpath, "rb") as f:
-                while file_idx < offset:
-                    # get the length of the next message
-                    raw_length: bytes = f.read(HEADER_SIZE)
-                    length: int = struct.unpack(">I", raw_length)[0]
+            # read the message content
+            target_message_len_raw: bytes = os.read(self.fd, HEADER_SIZE)
+            target_message_length: int = struct.unpack(">I", target_message_len_raw)[0]
+            raw_target_payload: bytes = os.read(self.fd, target_message_length)
 
-                    # skip the message content
-                    f.seek(length, os.SEEK_CUR)
+            # reset to start of the file
+            os.lseek(self.fd, 0, os.SEEK_SET)
 
-                    # increment file index
-                    file_idx += 1
+            try:
+                message_content: dict = json.loads(raw_target_payload.decode("utf-8"))
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Invalid JSON payload: {e}")
 
-                # when we reach desired offset, read the message content
-                if file_idx != offset:
-                    raise ValueError(f"Offset {offset} is out of range")
+            return message_content
 
-                # read the message content
-                target_message_len_raw: bytes = f.read(HEADER_SIZE)
-                target_message_length: int = struct.unpack(
-                    ">I", target_message_len_raw
-                )[0]
-                raw_target_payload: bytes = f.read(target_message_length)
+    def _get_partition_size(self) -> tuple[int, int]:
+        """Get the size (max offset) of the partition
 
-                try:
-                    message_content: dict = json.loads(
-                        raw_target_payload.decode("utf-8")
-                    )
-                except json.JSONDecodeError as e:
-                    raise ValueError(f"Invalid JSON payload: {e}")
+        Returns:
+            dict[int, int]: A dictionary mapping logical offset to the byte offset.
+        """
+        original_fd_pos = os.lseek(
+            self.fd, 0, os.SEEK_CUR
+        )  # save current file pointer position
+        os.lseek(self.fd, 0, os.SEEK_SET)  # seek to beginning of the file
 
-                return message_content
+        logical_idx: int = 0
+        byte_idx: int = 0
 
-    def _get_partition_size(self) -> int:
-        """Get the size (max offset) of the partition"""
-        file_idx: int = 0
-        end_of_log: bool = False
+        # TODO: logic for recovering half-written messages
+        while True:
+            # get length of the next message (os.read advances the file pointer)
+            raw_length: bytes = os.read(self.fd, HEADER_SIZE)
+            if not raw_length:
+                break
 
-        with open(self.fpath, "rb") as f:
-            while not end_of_log:
-                # get length of the next message
-                raw_length: bytes = f.read(HEADER_SIZE)
-                if not raw_length:
-                    end_of_log = True
-                    break
+            # get event content length and skip the event content
+            content_length: int = struct.unpack(">I", raw_length)[0]
 
-                # get event content length and skip the event content
-                length: int = struct.unpack(">I", raw_length)[0]
-                f.seek(length, os.SEEK_CUR)
+            # seek forward to skip the event content
+            os.lseek(self.fd, content_length, os.SEEK_CUR)
 
-                # increment file index for each event
-                file_idx += 1
+            # increment logical index and byte index for each event
+            logical_idx += 1
+            byte_idx += HEADER_SIZE + content_length
 
-        logger.info(f"Partition size: {file_idx}")
-        return file_idx
+        os.lseek(
+            self.fd, original_fd_pos, os.SEEK_SET
+        )  # restore original file pointer position
+
+        logger.info(f"Partition size: {logical_idx} ({byte_idx} bytes)")
+        return logical_idx, byte_idx
 
 
 # TODO: redundant?
@@ -151,14 +154,11 @@ class Storage:
                 )
 
     def insert(self, topic: str, partition: int, message: bytes) -> None:
-        # add message to the end of the WAL
+        """Append a message to the WAL"""
         self._topics[topic].partitions[partition].append(message)
 
-        # update the end offset (i.e length) of the partition
-        self._topics[topic].partitions[partition].end_offset += 1
-
-    def get(self, topic: str, partition: int, offset: int) -> dict:
-        return self._topics[topic].partitions[partition].read_from(offset)
+    def get(self, topic: str, partition: int, logical_offset: int) -> dict:
+        return self._topics[topic].partitions[partition].read_from(logical_offset)
 
     def get_partition_size(self, topic: str, partition: int) -> int:
         return self._topics[topic].partitions[partition].end_offset
