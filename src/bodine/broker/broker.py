@@ -6,7 +6,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from bodine.broker import logs
-from bodine.broker.models import Client, ConnRegistry, ConsumerGroupRegistry, Event
+from bodine.broker.models import Client, ConnRegistry, Event
+from bodine.broker.registry import ConsumerGroupRegistry
 from bodine.broker.utils import HEADER_SIZE, ClientDisconnected
 from bodine.broker.wal import Storage
 
@@ -208,35 +209,45 @@ class Broker:
 
             logger.info(f"{topic}@{client.id} Poll recieved...")
 
-            # get client's offset from the consumer group registry
-            offset: int = self.consumer_registry.lookup(client.id, group, topic)
+            # TODO: iterate through each of that client's assigned partitions for that topic
+            # get client's offset(s) from the consumer group registry
+            offsets: dict[int, int] = self.consumer_registry.lookup(
+                client.id, group, topic
+            )
 
-            # get the client's partition
-            partition: int = self.consumer_registry.get_partition(
+            # get the client's partition(s). e.g (0, 2), (1), (1, 2), etc.
+            partitions: list[int] = self.consumer_registry.get_partitions(
                 client.id, topic, group
             )
 
-            # send NO_NEW_MESSAGES if offset is greater or equal to partition size
-            if offset >= self.storage.get_partition_size(topic, partition):
-                resp: dict = {
-                    "type": "poll_response",
-                    "topic": topic,
-                    "group": group,
-                    "content": "",
-                }
+            # TODO: maybe map partitions->offsets here before loop?
+
+            for partition in partitions:
+                logger.info(f"{topic}@{client.id} Offset: {offsets}")
+
+                # send NO_NEW_MESSAGES if offset is greater or equal to partition size
+                if offset >= self.storage.get_partition_size(topic, partition):
+                    resp: dict = {
+                        "type": "poll_response",
+                        "topic": topic,
+                        "group": group,
+                        "content": "",
+                    }
+                    self.send_poll_response(
+                        sock=client.conn, status="NO_NEW_MESSAGES", event=resp
+                    )
+                    continue
+
+                # retrieve message from the database matching the offset
+                offset_message: dict = self.storage.get(topic, partition, offset)
+
+                # increment consumer group offset by 1 for the next poll request
+                self.consumer_registry.increment(group, topic, partition)
+
+                # respond to the client with the offset message
                 self.send_poll_response(
-                    sock=client.conn, status="NO_NEW_MESSAGES", event=resp
+                    sock=client.conn, status="OK", event=offset_message
                 )
-                continue
-
-            # retrieve message from the database matching the offset
-            offset_message: dict = self.storage.get(topic, partition, offset)
-
-            # increment client offset by 1 for the next poll request
-            self.consumer_registry.increment(group, topic, partition)
-
-            # respond to the client with the offset message
-            self.send_poll_response(sock=client.conn, status="OK", event=offset_message)
 
     def _build_payload(self, message: str) -> bytes:
         """Create a message with the topic and message. The message length is added to the first 4 bytes of the payload"""
